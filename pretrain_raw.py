@@ -45,8 +45,6 @@ import speechbrain as sb
 from speechbrain.utils.distributed import if_main_process, run_on_main
 from speechbrain.utils.logger import get_logger
 
-import flags
-
 logger = get_logger(__name__)
 
 
@@ -60,15 +58,8 @@ class ASR(sb.core.Brain):
 
         # compute features
         feats = self.hparams.compute_features(wavs)
-        if flags.PRINT_NAN_INF:
-            print(
-                f"[DEBUG] After compute_features: feats has NaN: {torch.isnan(feats).any()}, shape: {feats.shape}")
-
         current_epoch = self.hparams.epoch_counter.current
         feats = self.modules.normalize(feats, wav_lens, epoch=current_epoch)
-        if flags.PRINT_NAN_INF:
-            print(
-                f"[DEBUG] After normalize: feats has NaN: {torch.isnan(feats).any()}")
 
         # Add feature augmentation if specified.
         augment_warmup = 0
@@ -80,95 +71,12 @@ class ASR(sb.core.Brain):
                 tokens_bos = self.hparams.fea_augment.replicate_labels(
                     tokens_bos
                 )
-                if flags.PRINT_NAN_INF:
-                    print(
-                        f"[DEBUG] After fea_augment: feats has NaN: {torch.isnan(feats).any()}")
 
         # forward modules
         src = self.modules.CNN(feats)
-        if flags.PRINT_NAN_INF:
-            print(
-                f"[DEBUG] After CNN: src has NaN: {torch.isnan(src).any()}, shape: {src.shape}")
-
-        # Reshape CNN output from 4D to 3D (same logic as TransformerASR.encode)
-        # CNN outputs (batch, time, ch1, ch2) and we reshape to (batch, time, ch1*ch2)
-        if src.dim() == 4:
-            bz, t, ch1, ch2 = src.shape
-            src = src.reshape(bz, t, ch1 * ch2)
-
-        if flags.PRINT_NAN_INF:
-            print(
-                f"[DEBUG] After reshape: src has NaN: {torch.isnan(src).any()}, has Inf: {torch.isinf(src).any()}")
-        if torch.isnan(src).any() or torch.isinf(src).any():
-            if flags.PRINT_NAN_INF:
-                print(f"[DEBUG] src stats: min={src[~torch.isnan(src) & ~torch.isinf(src)].min() if (~torch.isnan(src) & ~torch.isinf(src)).any() else 'N/A'}, "
-                      f"max={src[~torch.isnan(src) & ~torch.isinf(src)].max() if (~torch.isnan(src) & ~torch.isinf(src)).any() else 'N/A'}")
-                print(
-                    f"[DEBUG] Number of NaN values: {torch.isnan(src).sum()}, Inf values: {torch.isinf(src).sum()}")
-            # Check CNN parameters
-            for name, param in self.modules.CNN.named_parameters():
-                if torch.isnan(param).any() or torch.isinf(param).any():
-                    if flags.PRINT_NAN_INF:
-                        print(
-                            f"[DEBUG] CNN parameter {name} has NaN: {torch.isnan(param).any()}, Inf: {torch.isinf(param).any()}")
-
-        # === BoundaryPredictor2 Integration ===
-        batch_size, src_seq_len, src_dim = src.shape
-
-        if flags.PRINT_FLOW:
-            print(f"[pretrain.py] BEFORE BoundaryPredictor:")
-        if flags.PRINT_DATA:
-            print(f"  src.shape = {src.shape}")
-            print(f"  wav_lens.shape = {wav_lens.shape}")
-            print(f"  wav_lens = {wav_lens}")
-
-        # Compute target boundary counts using arbitrary prior
-        if stage == sb.Stage.TRAIN:
-            # Calculate actual lengths for target counts
-            actual_lens = (wav_lens * src_seq_len).long()
-            target_boundary_counts = (actual_lens.float() *
-                                      self.hparams.boundary_predictor_prior)
-            target_boundary_counts = target_boundary_counts.to(src.device)
-        else:
-            target_boundary_counts = None
-
-        # Apply BoundaryPredictor2 with lengths
-        (bp_out, bp_loss, num_boundaries, total_positions,
-         bp_wav_lens, boundary_cv, boundary_adjacent_pct) = self.modules.BoundaryPredictor(
-            hidden=src,
-            lengths=wav_lens,
-            target_boundary_counts=target_boundary_counts,
-            return_unreduced_boundary_loss=False
-        )
-
-        if flags.PRINT_FLOW:
-            print(f"[pretrain.py] AFTER BoundaryPredictor:")
-        if flags.PRINT_DATA:
-            print(f"  bp_out.shape = {bp_out.shape}")
-            print(f"  bp_wav_lens.shape = {bp_wav_lens.shape}")
-            print(f"  bp_wav_lens = {bp_wav_lens}")
-            print(f"  num_boundaries = {num_boundaries}")
-            print(f"  total_positions = {total_positions}")
-
-        # Store BP outputs for logging
-        self.boundary_predictor_loss = bp_loss
-        self.num_boundaries = num_boundaries
-        self.total_positions = total_positions
-        self.boundary_cv = boundary_cv
-        self.boundary_adjacent_pct = boundary_adjacent_pct
-
-        if flags.PRINT_FLOW:
-            print(f"[pretrain.py] BEFORE Transformer:")
-        if flags.PRINT_DATA:
-            print(f"  bp_out.shape = {bp_out.shape}")
-            print(f"  tokens_bos.shape = {tokens_bos.shape}")
-            print(f"  bp_wav_lens.shape = {bp_wav_lens.shape}")
-            print(f"  bp_wav_lens = {bp_wav_lens}")
-            print(
-                f"  bp_wav_lens min/max = {bp_wav_lens.min().item():.4f} / {bp_wav_lens.max().item():.4f}")
 
         enc_out, pred = self.modules.Transformer(
-            bp_out, tokens_bos, bp_wav_lens, pad_idx=self.hparams.pad_index
+            src, tokens_bos, wav_lens, pad_idx=self.hparams.pad_index
         )
 
         # output layer for ctc log-probabilities
@@ -195,14 +103,14 @@ class ASR(sb.core.Brain):
             # Decide searcher for inference: valid or test search
             if stage == sb.Stage.VALID:
                 hyps, _, _, _ = self.hparams.valid_search(
-                    enc_out.detach(), bp_wav_lens
+                    enc_out.detach(), wav_lens
                 )
             else:
                 hyps, _, _, _ = self.hparams.test_search(
-                    enc_out.detach(), bp_wav_lens
+                    enc_out.detach(), wav_lens
                 )
 
-        return p_ctc, p_seq, bp_wav_lens, hyps
+        return p_ctc, p_seq, wav_lens, hyps
 
     def compute_objectives(self, predictions, batch, stage):
         """Computes the loss (CTC+NLL) given predictions and targets."""
@@ -240,21 +148,9 @@ class ASR(sb.core.Brain):
             p_ctc, tokens, wav_lens, tokens_lens
         ).sum()
 
-        # Add boundary predictor loss
-        if stage == sb.Stage.TRAIN:
-            loss_boundary = self.boundary_predictor_loss
-        else:
-            loss_boundary = torch.tensor(0.0, device=p_ctc.device)
-
-        # Combine losses
-        loss_asr = (
+        loss = (
             self.hparams.ctc_weight * loss_ctc
             + (1 - self.hparams.ctc_weight) * loss_seq
-        )
-
-        loss = (
-            loss_asr
-            + self.hparams.boundary_predictor_loss_weight * loss_boundary
         )
 
         if stage != sb.Stage.TRAIN:
@@ -287,8 +183,7 @@ class ASR(sb.core.Brain):
 
         self.hparams.model.load_state_dict(ckpt, strict=True)
         self.hparams.model.eval()
-        if flags.PRINT_FLOW:
-            print("Loaded the average")
+        print("Loaded the average")
 
     def on_stage_start(self, stage, epoch):
         """Gets called at the beginning of each epoch"""
@@ -302,15 +197,6 @@ class ASR(sb.core.Brain):
         stage_stats = {"loss": stage_loss}
         if stage == sb.Stage.TRAIN:
             self.train_stats = stage_stats
-            # Add boundary predictor statistics
-            if hasattr(self, 'num_boundaries') and hasattr(self, 'total_positions'):
-                if self.total_positions > 0:
-                    boundary_rate = self.num_boundaries / self.total_positions
-                    stage_stats["boundary_rate"] = boundary_rate
-                if self.boundary_cv is not None:
-                    stage_stats["boundary_cv"] = self.boundary_cv
-                if self.boundary_adjacent_pct is not None:
-                    stage_stats["boundary_adjacent_pct"] = self.boundary_adjacent_pct
         else:
             stage_stats["ACC"] = self.acc_metric.summarize()
             current_epoch = self.hparams.epoch_counter.current
@@ -320,16 +206,6 @@ class ASR(sb.core.Brain):
                 or stage == sb.Stage.TEST
             ):
                 stage_stats["WER"] = self.wer_metric.summarize("error_rate")
-
-            # Add boundary predictor statistics
-            if hasattr(self, 'num_boundaries') and hasattr(self, 'total_positions'):
-                if self.total_positions > 0:
-                    boundary_rate = self.num_boundaries / self.total_positions
-                    stage_stats["boundary_rate"] = boundary_rate
-                if self.boundary_cv is not None:
-                    stage_stats["boundary_cv"] = self.boundary_cv
-                if self.boundary_adjacent_pct is not None:
-                    stage_stats["boundary_adjacent_pct"] = self.boundary_adjacent_pct
 
         # log stats and save checkpoint at end-of-epoch
         if stage == sb.Stage.VALID:
@@ -378,23 +254,7 @@ class ASR(sb.core.Brain):
     def on_fit_batch_end(self, batch, outputs, loss, should_step):
         """At the end of the optimizer step, apply noam annealing."""
         if should_step:
-            # Check for NaN/Inf in gradients before optimizer step
-            for name, param in self.modules.named_parameters():
-                if param.grad is not None:
-                    if torch.isnan(param.grad).any() or torch.isinf(param.grad).any():
-                        if flags.PRINT_NAN_INF:
-                            print(
-                                f"[DEBUG] Gradient issue in {name}: NaN: {torch.isnan(param.grad).any()}, Inf: {torch.isinf(param.grad).any()}")
-                            print(f"[DEBUG] Grad norm: {param.grad.norm()}")
-
-            # Check for NaN/Inf in parameters after optimizer step
             self.hparams.noam_annealing(self.optimizer)
-
-            for name, param in self.modules.named_parameters():
-                if torch.isnan(param).any() or torch.isinf(param).any():
-                    if flags.PRINT_NAN_INF:
-                        print(
-                            f"[DEBUG] Parameter corrupted after optimizer step: {name}")
 
 
 def dataio_prepare(hparams):
