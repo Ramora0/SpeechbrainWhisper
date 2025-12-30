@@ -25,7 +25,7 @@ class BoundaryPredictor2(nn.Module):
         self.q_proj_layer = nn.Linear(input_dim, input_dim, bias=False)
         self.k_proj_layer = nn.Linear(input_dim, input_dim, bias=False)
 
-        self.similarity_bias = nn.Parameter(torch.tensor(0.1))
+        self.similarity_bias = nn.Parameter(torch.tensor(0.098))
 
         with torch.no_grad():
             self.q_proj_layer.weight.copy_(torch.eye(input_dim))
@@ -69,6 +69,10 @@ class BoundaryPredictor2(nn.Module):
 
     def set_prior(self, prior):
         self.prior = prior
+
+    def set_temperature(self, temp):
+        """Set the temperature for the RelaxedBernoulli distribution."""
+        self.temp = temp
 
     def set_compression_schedule(self, schedule_value):
         """
@@ -255,17 +259,17 @@ class BoundaryPredictor2(nn.Module):
                 print(f"  Number of NaN values: {torch.isnan(probs).sum()}")
                 print(f"  cos_sim min/max: {cos_sim.min()}/{cos_sim.max()}")
                 print(f"  similarity_bias: {self.similarity_bias.item()}")
-        if self.training:
-            bernoulli = torch.distributions.relaxed_bernoulli.RelaxedBernoulli(
-                temperature=self.temp,
-                probs=probs,
-            )
-            soft_boundaries = bernoulli.rsample()
-            hard_samples = (soft_boundaries > 0.5).float()
-        else:
-            # During evaluation, threshold probabilities directly without sampling
-            soft_boundaries = probs
-            hard_samples = (probs > 0.5).float()
+        # if self.training:
+        bernoulli = torch.distributions.relaxed_bernoulli.RelaxedBernoulli(
+            temperature=self.temp,
+            probs=probs,
+        )
+        soft_boundaries = bernoulli.rsample()
+        hard_samples = (soft_boundaries > 0.5).float()
+        # else:
+        #     # During evaluation, threshold probabilities directly without sampling
+        #     soft_boundaries = probs
+        #     hard_samples = (probs > 0.5).float()
 
         # Mask boundaries based on lengths
         batch_size, boundary_seq_len = soft_boundaries.shape
@@ -288,6 +292,26 @@ class BoundaryPredictor2(nn.Module):
             hard_samples - soft_boundaries.detach() + soft_boundaries
         )
 
+        # Ensure each sequence has at least one boundary to prevent empty segments
+        # This is a safeguard that should rarely trigger
+        boundary_seq_len = hard_boundaries.shape[1]
+        sequences_with_no_boundaries = []
+        for i in range(batch_size):
+            # Check if this sequence has any boundaries
+            if hard_boundaries[i].sum() == 0:
+                sequences_with_no_boundaries.append(i)
+                # Add boundary at the last valid position (ensure within bounds)
+                valid_len = min(actual_lens[i].item() - 1, boundary_seq_len)
+                boundary_idx = min(valid_len, boundary_seq_len - 1)
+                if boundary_idx >= 0:
+                    hard_boundaries[i, boundary_idx] = 1.0
+
+        # Print warning if this happens during training (should be rare)
+        if len(sequences_with_no_boundaries) > 0 and self.training:
+            print(
+                f"[BoundaryPredictor.py] WARNING: Added emergency boundary for {len(sequences_with_no_boundaries)} sequence(s) with no boundaries during TRAINING")
+            print(f"  Affected sequences: {sequences_with_no_boundaries}")
+
         if flags.PRINT_FLOW:
             print(f"[BoundaryPredictor.py] BEFORE _attention_pooling:")
         if flags.PRINT_DATA:
@@ -302,6 +326,35 @@ class BoundaryPredictor2(nn.Module):
             print(f"[BoundaryPredictor.py] AFTER _attention_pooling:")
         if flags.PRINT_DATA:
             print(f"  pooled.shape = {pooled.shape}")
+
+        # ERROR CHECK: Detect if entire pooled output is empty
+        # if pooled.shape[1] == 0:
+        #     mode = "TRAINING" if self.training else "EVALUATION"
+        #     print(f"\n{'='*80}")
+        #     print(
+        #         f"[BoundaryPredictor.py] ERROR: Empty pooled output (no segments) in {mode} mode!")
+        #     print(f"{'='*80}")
+        #     print(f"DIAGNOSTICS:")
+        #     print(f"  Mode: {mode}")
+        #     print(f"  pooled.shape = {pooled.shape}")
+        #     print(f"  hidden.shape = {hidden.shape}")
+        #     print(f"  lengths = {lengths}")
+        #     print(f"  hard_boundaries.shape = {hard_boundaries.shape}")
+        #     print(
+        #         f"  hard_boundaries sum per sample = {hard_boundaries.sum(dim=1)}")
+        #     print(f"\n  All samples boundary info:")
+        #     for i in range(min(batch_size, 5)):
+        #         print(
+        #             f"    Sample {i}: sum = {hard_boundaries[i].sum().item()}, first 30 = {hard_boundaries[i, :30]}")
+        #     print(f"\n  probs (first 30 values for first 3 samples):")
+        #     for i in range(min(batch_size, 3)):
+        #         print(f"    Sample {i}: {probs[i, :30]}")
+        #     print(f"\n  Boundary predictor state:")
+        #     print(f"    self.training = {self.training}")
+        #     print(f"    self.temp = {self.temp}")
+        #     print(f"    self.prior = {self.prior}")
+        #     print(f"    self.similarity_bias = {self.similarity_bias.item()}")
+        #     print(f"{'='*80}\n")
 
         # Compute shortened lengths based on boundary positions
         batch_size = hard_boundaries.shape[0]
@@ -347,6 +400,46 @@ class BoundaryPredictor2(nn.Module):
         if flags.PRINT_DATA:
             print(
                 f"[BoundaryPredictor.py] shortened_lengths = {shortened_lengths}")
+
+        # ERROR CHECK: Detect if any sequence has zero-length output
+        # zero_length_mask = (shortened_lengths == 0.0)
+        # if zero_length_mask.any():
+        #     mode = "TRAINING" if self.training else "EVALUATION"
+        #     num_zero = zero_length_mask.sum().item()
+        #     print(f"\n{'='*80}")
+        #     print(
+        #         f"[BoundaryPredictor.py] ERROR: {num_zero} sequence(s) with zero-length output in {mode} mode!")
+        #     print(f"{'='*80}")
+        #     print(f"DIAGNOSTICS:")
+        #     print(f"  Mode: {mode}")
+        #     print(f"  pooled.shape = {pooled.shape}")
+        #     print(f"  hidden.shape = {hidden.shape}")
+        #     print(f"  lengths = {lengths}")
+        #     print(f"  shortened_lengths = {shortened_lengths}")
+        #     print(f"  zero_length_mask = {zero_length_mask}")
+        #     print(f"\n  hard_boundaries.shape = {hard_boundaries.shape}")
+        #     print(
+        #         f"  hard_boundaries sum per sample = {hard_boundaries.sum(dim=1)}")
+        #     print(f"\n  For samples with zero length:")
+        #     for i in range(batch_size):
+        #         if zero_length_mask[i]:
+        #             valid_len = actual_lens[i].item()
+        #             num_boundaries = hard_boundaries[i,
+        #                                              :valid_len].sum().item()
+        #             print(f"\n    Sample {i}:")
+        #             print(f"      input length = {lengths[i].item():.4f}")
+        #             print(f"      actual_len = {valid_len}")
+        #             print(f"      num_boundaries = {num_boundaries}")
+        #             print(f"      max_segments = {max_segments}")
+        #             print(f"      probs[:30] = {probs[i, :30]}")
+        #             print(
+        #                 f"      hard_boundaries[:30] = {hard_boundaries[i, :30]}")
+        #     print(f"\n  Boundary predictor state:")
+        #     print(f"    self.training = {self.training}")
+        #     print(f"    self.temp = {self.temp}")
+        #     print(f"    self.prior = {self.prior}")
+        #     print(f"    self.similarity_bias = {self.similarity_bias.item()}")
+        #     print(f"{'='*80}\n")
 
         num_boundaries_tensor = hard_boundaries.sum()
         seq_len = hidden.shape[1]

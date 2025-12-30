@@ -139,13 +139,15 @@ lm_weight: 0.60
 ctc_weight_decode: 0.40
 
 # BoundaryPredictor2 parameters
-boundary_predictor_prior: 0.096
+# Total compression: 10.4x = 2x (CNN) * 5.2x (BP)
+# BP prior = 1/5.2 ≈ 0.192
+boundary_predictor_prior: 0.192
 boundary_predictor_temp: 1.0
 boundary_predictor_loss_weight: 1.0
 
 ############################## Models ##########################################
 
-# Main ConvolutionFrontEnd
+# Main ConvolutionFrontEnd (2x compression in time)
 conv_frontend: !new:speechbrain.lobes.models.convolution.ConvolutionFrontEnd
   input_shape: (8, 10, 80)
   num_blocks: 1
@@ -155,7 +157,7 @@ conv_frontend: !new:speechbrain.lobes.models.convolution.ConvolutionFrontEnd
   strides: (2)
   residuals: (False)
 
-# Additional time-only striding convolution layer (after ConvolutionFrontEnd)
+# Additional convolution layer (no time compression, just channel reduction)
 time_stride_conv: !new:speechbrain.nnet.CNN.Conv2d
   in_channels: 64
   out_channels: 32

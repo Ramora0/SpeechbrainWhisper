@@ -295,6 +295,15 @@ class ASR(sb.core.Brain):
         if stage != sb.Stage.TRAIN:
             self.acc_metric = self.hparams.acc_computer()
             self.wer_metric = self.hparams.error_rate_computer()
+        else:
+            # Schedule temperature from 1.0 to 0.0 over training
+            total_epochs = self.hparams.number_of_epochs
+            if total_epochs > 1:
+                temperature = max(0.0, 1.0 - (epoch / (total_epochs - 1)))
+            else:
+                temperature = 1.0
+            self.modules.BoundaryPredictor.set_temperature(temperature)
+            logger.info(f"Epoch {epoch}: BoundaryPredictor temperature = {temperature:.4f}")
 
     def on_stage_end(self, stage, stage_loss, epoch):
         """Gets called at the end of a epoch."""
