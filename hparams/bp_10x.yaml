@@ -145,6 +145,9 @@ boundary_predictor_prior: 0.192
 boundary_predictor_temp: 1.0
 boundary_predictor_loss_weight: 1.0
 
+# Phoneme-based boundary targets
+use_phoneme_boundary_targets: True   # Enable phoneme counting
+
 ############################## Models ##########################################
 
 # Main ConvolutionFrontEnd (2x compression in time)

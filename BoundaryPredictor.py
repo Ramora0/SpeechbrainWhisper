@@ -259,17 +259,17 @@ class BoundaryPredictor2(nn.Module):
                 print(f"  Number of NaN values: {torch.isnan(probs).sum()}")
                 print(f"  cos_sim min/max: {cos_sim.min()}/{cos_sim.max()}")
                 print(f"  similarity_bias: {self.similarity_bias.item()}")
-        # if self.training:
-        bernoulli = torch.distributions.relaxed_bernoulli.RelaxedBernoulli(
-            temperature=self.temp,
-            probs=probs,
-        )
-        soft_boundaries = bernoulli.rsample()
-        hard_samples = (soft_boundaries > 0.5).float()
-        # else:
-        #     # During evaluation, threshold probabilities directly without sampling
-        #     soft_boundaries = probs
-        #     hard_samples = (probs > 0.5).float()
+        if self.training:
+            bernoulli = torch.distributions.relaxed_bernoulli.RelaxedBernoulli(
+                temperature=self.temp,
+                probs=probs,
+            )
+            soft_boundaries = bernoulli.rsample()
+            hard_samples = (soft_boundaries > 0.5).float()
+        else:
+            # During evaluation, threshold probabilities directly without sampling
+            soft_boundaries = probs
+            hard_samples = (probs > 0.5).float()
 
         # Mask boundaries based on lengths
         batch_size, boundary_seq_len = soft_boundaries.shape

@@ -46,8 +46,48 @@ from speechbrain.utils.distributed import if_main_process, run_on_main
 from speechbrain.utils.logger import get_logger
 
 import flags
+import string
+from g2p_en import G2p
 
 logger = get_logger(__name__)
+
+# Initialize G2P converter once at module level
+G2P_CONVERTER = G2p()
+
+
+def count_phonemes(text: str) -> float:
+    """Count phonemes in text using G2P conversion.
+
+    Args:
+        text: Input text string
+
+    Returns:
+        Number of phonemes (as float for consistency with loss function)
+    """
+    normalized = text.strip().lower()
+    if not normalized:
+        return 0.0
+
+    phoneme_sequence = G2P_CONVERTER(normalized)
+    phoneme_tokens = [
+        token
+        for token in phoneme_sequence
+        if token.strip() and token not in string.punctuation
+    ]
+    return float(len(phoneme_tokens))
+
+
+def count_phonemes_batch(text_list: list) -> torch.Tensor:
+    """Count phonemes for a batch of texts.
+
+    Args:
+        text_list: List of text strings
+
+    Returns:
+        Tensor of shape (batch_size,) with phoneme counts
+    """
+    counts = [count_phonemes(text) for text in text_list]
+    return torch.tensor(counts, dtype=torch.float32)
 
 
 # Define training procedure
@@ -122,13 +162,32 @@ class ASR(sb.core.Brain):
             print(f"  wav_lens.shape = {wav_lens.shape}")
             print(f"  wav_lens = {wav_lens}")
 
-        # Compute target boundary counts using arbitrary prior
+        # Compute target boundary counts
         if stage == sb.Stage.TRAIN:
-            # Calculate actual lengths for target counts
-            actual_lens = (wav_lens * src_seq_len).long()
-            target_boundary_counts = (actual_lens.float() *
-                                      self.hparams.boundary_predictor_prior)
-            target_boundary_counts = target_boundary_counts.to(src.device)
+            if self.hparams.get('use_phoneme_boundary_targets', False):
+                # Count phonemes from text
+                phoneme_counts = count_phonemes_batch(batch.wrd)
+                actual_lens = (wav_lens * src_seq_len).long()
+
+                # Clip to valid range [1, actual_lens]
+                target_boundary_counts = torch.clamp(
+                    phoneme_counts,
+                    min=1.0,
+                    max=actual_lens.float()
+                ).to(src.device)
+
+                if flags.PRINT_DATA:
+                    print(f"[Phoneme Targets] text: {batch.wrd[0][:50]}...")
+                    print(
+                        f"[Phoneme Targets] phoneme_counts: {phoneme_counts[:5]}")
+                    print(
+                        f"[Phoneme Targets] target_counts: {target_boundary_counts[:5]}")
+            else:
+                # Fallback to prior-based calculation
+                actual_lens = (wav_lens * src_seq_len).long()
+                target_boundary_counts = (actual_lens.float() *
+                                          self.hparams.boundary_predictor_prior)
+                target_boundary_counts = target_boundary_counts.to(src.device)
         else:
             target_boundary_counts = None
 
@@ -303,7 +362,8 @@ class ASR(sb.core.Brain):
             else:
                 temperature = 1.0
             self.modules.BoundaryPredictor.set_temperature(temperature)
-            logger.info(f"Epoch {epoch}: BoundaryPredictor temperature = {temperature:.4f}")
+            logger.info(
+                f"Epoch {epoch}: BoundaryPredictor temperature = {temperature:.4f}")
 
     def on_stage_end(self, stage, stage_loss, epoch):
         """Gets called at the end of a epoch."""
