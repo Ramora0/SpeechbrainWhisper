@@ -10,4 +10,4 @@ PRINT_DATA = False
 PRINT_BP_LOSS_CHECKS = True
 
 # Flag for NaN/Inf checks
-PRINT_NAN_INF = False
+PRINT_NAN_INF = True

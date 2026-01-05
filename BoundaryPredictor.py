@@ -450,10 +450,19 @@ class BoundaryPredictor2(nn.Module):
         if self.training:
             per_sample_loss = 10. * self.calc_loss_target_counts(
                 hard_boundaries,
+                soft_boundaries,
                 lengths,
                 target_boundary_counts,
                 reduce=False,
             )
+
+            # per_sample_loss = 0.001 * self.calc_ratio_loss(
+            #     hard_boundaries,
+            #     soft_boundaries,
+            #     lengths,
+            #     target_boundary_counts,
+            #     reduce=False,
+            # )
 
             if return_unreduced_boundary_loss:
                 loss = per_sample_loss
@@ -466,12 +475,6 @@ class BoundaryPredictor2(nn.Module):
 
         num_boundaries = num_boundaries_tensor.item()
         total_positions = total_positions_tensor.item()
-
-        # Always print effective compression rate during training
-        if self.training and total_positions > 0:
-            effective_compression_rate = total_positions / num_boundaries
-            print(
-                f"[BoundaryPredictor] Effective compression rate: {effective_compression_rate:.4f} ({total_positions}/{num_boundaries} boundaries)")
 
         boundary_cv = None
         boundary_adjacent_pct = None
@@ -542,6 +545,7 @@ class BoundaryPredictor2(nn.Module):
     def calc_loss_target_counts(
         self,
         hard_boundaries,
+        soft_boundaries,
         lengths,
         target_boundary_counts,
         reduce=True,
@@ -552,22 +556,9 @@ class BoundaryPredictor2(nn.Module):
         device = hard_boundaries.device
         per_item_boundaries = hard_boundaries.sum(dim=1)
 
-        if flags.PRINT_DATA:
-            print(
-                f"[BP calc_loss] hard_boundaries.shape: {hard_boundaries.shape}")
-            print(f"[BP calc_loss] per_item_boundaries: {per_item_boundaries}")
-            print(f"[BP calc_loss] lengths: {lengths}")
-            print(
-                f"[BP calc_loss] target_boundary_counts: {target_boundary_counts}")
-
         seq_len = hard_boundaries.shape[1] + 1  # boundaries are seq_len - 1
         actual_lens = (lengths * seq_len).long()
         per_item_totals = actual_lens.float()
-
-        if flags.PRINT_DATA:
-            print(f"[BP calc_loss] seq_len: {seq_len}")
-            print(f"[BP calc_loss] actual_lens: {actual_lens}")
-            print(f"[BP calc_loss] per_item_totals: {per_item_totals}")
 
         per_item_totals = per_item_totals.to(dtype=torch.float32)
         target_boundary_counts = target_boundary_counts.to(
@@ -575,42 +566,61 @@ class BoundaryPredictor2(nn.Module):
             dtype=torch.float32,
         )
 
-        # Check for problematic values before loss computation
-        if (per_item_boundaries > per_item_totals).any():
-            if flags.PRINT_BP_LOSS_CHECKS:
-                print(
-                    f"[BP calc_loss] WARNING: per_item_boundaries > per_item_totals!")
-                print(
-                    f"  Boundaries: {per_item_boundaries[per_item_boundaries > per_item_totals]}")
-                print(
-                    f"  Totals: {per_item_totals[per_item_boundaries > per_item_totals]}")
-
-        if (target_boundary_counts > per_item_totals).any():
-            if flags.PRINT_BP_LOSS_CHECKS:
-                print(
-                    f"[BP calc_loss] WARNING: target_boundary_counts > per_item_totals!")
-                print(
-                    f"  Targets: {target_boundary_counts[target_boundary_counts > per_item_totals]}")
-                print(
-                    f"  Totals: {per_item_totals[target_boundary_counts > per_item_totals]}")
-
         loss_values = binomial_loss_from_target_counts(
             per_item_boundaries.to(dtype=torch.float32),
             per_item_totals,
             target_boundary_counts,
         )
 
-        if flags.PRINT_DATA:
-            print(f"[BP calc_loss] loss_values: {loss_values}")
-        if flags.PRINT_NAN_INF:
-            print(
-                f"[BP calc_loss] loss_values has NaN: {torch.isnan(loss_values).any()}")
-            print(
-                f"[BP calc_loss] loss_values has Inf: {torch.isinf(loss_values).any()}")
-
         if reduce:
             final_loss = loss_values.mean()
-            if flags.PRINT_DATA:
-                print(f"[BP calc_loss] final reduced loss: {final_loss}")
             return final_loss
+        return loss_values
+
+    def calc_ratio_loss(
+        self,
+        # Indicators (b_t): [batch, seq_len], STE-linked
+        hard_boundaries,
+        soft_boundaries,        # Probabilities (p_t): [batch, seq_len]
+        lengths,                # Effective lengths/masks: [batch]
+        target_boundary_counts,  # Target number of boundaries: [batch]
+        reduce=True,
+    ):
+        """
+        Implements the Ratio Loss from H-Net (Equation 10).
+
+        This loss guides the model toward a target compression ratio N.
+        Crucially, gradients only flow through G (the average probability), 
+        while F (the actual count) is treated as a non-differentiable constant.
+        """
+        # N: Target compression ratio (e.g., 6.0 for 1-stage)
+        # N = actual_length / target_count
+        N = (lengths / target_boundary_counts).unsqueeze(1)  # [batch, 1]
+
+        # F: The actual fraction of vectors selected.
+        # We detach hard_boundaries to ensure it doesn't provide gradients,
+        # as per the paper's specification that F is non-differentiable.
+        sum_b = hard_boundaries.detach().sum(dim=1, keepdim=True)
+        F = sum_b / lengths.unsqueeze(1)  # [batch, 1]
+
+        # G: The average boundary probability.
+        # This is the differentiable term that allows the router to be trained.
+        sum_p = soft_boundaries.sum(dim=1, keepdim=True)
+        G = sum_p / lengths.unsqueeze(1)  # [batch, 1]
+
+        # Ratio Loss Formula:
+        # L_ratio = (N / (N - 1)) * ((N - 1) * F * G + (1 - F) * (1 - G))
+        # This formulation is inspired by MoE load balancing.
+
+        term1 = (N - 1) * F * G
+        term2 = (1 - F) * (1 - G)
+        scaling = N / (N - 1)
+
+        loss_values = scaling * (term1 + term2)
+
+        if reduce:
+            # Standard H-Net practice is to average across the batch.
+            # This loss is typically scaled by alpha = 0.03.
+            return loss_values.mean()
+
         return loss_values

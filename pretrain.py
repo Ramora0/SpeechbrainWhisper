@@ -164,30 +164,29 @@ class ASR(sb.core.Brain):
 
         # Compute target boundary counts
         if stage == sb.Stage.TRAIN:
-            if self.hparams.get('use_phoneme_boundary_targets', False):
-                # Count phonemes from text
-                phoneme_counts = count_phonemes_batch(batch.wrd)
-                actual_lens = (wav_lens * src_seq_len).long()
+            # print("phonemez")
+            # Count phonemes from text
+            target_boundary_counts = count_phonemes_batch(batch.wrd)
+            # actual_lens = (wav_lens * src_seq_len).long()
 
-                # Clip to valid range [1, actual_lens]
-                target_boundary_counts = torch.clamp(
-                    phoneme_counts,
-                    min=1.0,
-                    max=actual_lens.float()
-                ).to(src.device)
+            # Clip to valid range [1, actual_lens]
+            # target_boundary_counts = torch.clamp(
+            #     phoneme_counts,
+            #     min=1.0,
+            #     max=actual_lens.float()
+            # ).to(src.device)
 
-                if flags.PRINT_DATA:
-                    print(f"[Phoneme Targets] text: {batch.wrd[0][:50]}...")
-                    print(
-                        f"[Phoneme Targets] phoneme_counts: {phoneme_counts[:5]}")
-                    print(
-                        f"[Phoneme Targets] target_counts: {target_boundary_counts[:5]}")
-            else:
-                # Fallback to prior-based calculation
-                actual_lens = (wav_lens * src_seq_len).long()
-                target_boundary_counts = (actual_lens.float() *
-                                          self.hparams.boundary_predictor_prior)
-                target_boundary_counts = target_boundary_counts.to(src.device)
+            # actual_lens = (wav_lens * src_seq_len).long()
+            # target_boundary_counts = (actual_lens.float() *
+            #                           self.hparams.boundary_predictor_prior)
+            # target_boundary_counts = target_boundary_counts.to(src.device)
+
+            if flags.PRINT_DATA:
+                print(f"[Phoneme Targets] text: {batch.wrd[0][:50]}...")
+                print(
+                    f"[Phoneme Targets] phoneme_counts: {phoneme_counts[:5]}")
+                print(
+                    f"[Phoneme Targets] target_counts: {target_boundary_counts[:5]}")
         else:
             target_boundary_counts = None
 
@@ -302,6 +301,7 @@ class ASR(sb.core.Brain):
         # Add boundary predictor loss
         if stage == sb.Stage.TRAIN:
             loss_boundary = self.boundary_predictor_loss
+            print(f"Binomial loss: {loss_boundary.item():.6f}")
         else:
             loss_boundary = torch.tensor(0.0, device=p_ctc.device)
 
@@ -356,9 +356,12 @@ class ASR(sb.core.Brain):
             self.wer_metric = self.hparams.error_rate_computer()
         else:
             # Schedule temperature from 1.0 to 0.0 over training
+            # Keep temperature 1 step behind to prevent it from reaching 0 (which causes NaN)
             total_epochs = self.hparams.number_of_epochs
             if total_epochs > 1:
-                temperature = max(0.0, 1.0 - (epoch / (total_epochs - 1)))
+                # Clamp epoch to stay 1 step behind, preventing temperature from reaching 0
+                effective_epoch = min(epoch, total_epochs - 2)
+                temperature = 1.0 - (effective_epoch / (total_epochs - 1))
             else:
                 temperature = 1.0
             self.modules.BoundaryPredictor.set_temperature(temperature)

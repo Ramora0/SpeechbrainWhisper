@@ -10,7 +10,6 @@ def _to_device_tensor(value, device):
 
 
 def binomial_loss_from_target_counts(num_boundaries, total_positions, target_counts, eps=1e-6):
-    print("=================BOOOOO====================")
     """Binomial loss where the expected count matches target boundary counts."""
     if not isinstance(num_boundaries, torch.Tensor):
         raise ValueError(
