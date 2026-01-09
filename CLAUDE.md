@@ -29,6 +29,7 @@ The `BoundaryPredictor2` module (in `BoundaryPredictor.py`) is the key innovatio
 - **Output**: Compressed sequence with variable-length segments
 
 Key implementation details:
+
 - The module maintains proper gradient flow using straight-through estimator: `hard_boundaries = (hard_samples - soft_boundaries.detach() + soft_boundaries)`
 - Includes safeguards to ensure every sequence has at least one boundary
 - Computes diagnostic metrics: boundary rate, coefficient of variation (CV), and adjacent boundary percentage
@@ -42,6 +43,7 @@ CTC Loss + Seq2Seq Loss + Boundary Loss
 ```
 
 The training loop (`pretrain.py`) computes three losses:
+
 1. **CTC Loss**: Connectionist Temporal Classification on encoder outputs
 2. **Seq2Seq Loss**: Cross-entropy on decoder predictions
 3. **Boundary Loss**: Binomial loss encouraging predicted boundaries to match phoneme counts
@@ -51,6 +53,7 @@ Loss combination: `loss = (ctc_weight * loss_ctc + (1 - ctc_weight) * loss_seq) 
 ### Phoneme Target Computation
 
 The `count_phonemes_batch()` function in `pretrain.py:80-91` converts transcripts to phoneme counts using:
+
 - `g2p_en` library for grapheme-to-phoneme conversion
 - Filters out punctuation and whitespace
 - Returns float tensor of phoneme counts per utterance
@@ -108,6 +111,7 @@ From `hparams/bp_10x.yaml`:
 ### Data Paths
 
 The YAML files expect:
+
 - `data_folder`: Raw LibriSpeech audio files
 - `data_manifest_folder`: Processed CSV manifests (shared across experiments)
 - `output_folder`: Experiment outputs, checkpoints, logs
@@ -130,6 +134,7 @@ Enable these when debugging training issues, especially gradient problems or bou
 ### BoundaryPredictor Integration
 
 When modifying the BoundaryPredictor:
+
 - Changes to boundary detection logic affect `BoundaryPredictor.py:228-273`
 - Pooling mechanism is in `BoundaryPredictor.py:95-211` (multi-head attention)
 - Loss computation is in `BoundaryPredictor.py:536-610` and `loss.py:12-81`
@@ -138,6 +143,7 @@ When modifying the BoundaryPredictor:
 ### Length Handling
 
 The codebase carefully tracks sequence lengths through compression stages:
+
 - Input: `wav_lens` (relative lengths 0-1)
 - After CNN: lengths unchanged (CNN pads appropriately)
 - After BoundaryPredictor: `bp_wav_lens` (recomputed based on boundaries)
@@ -146,6 +152,7 @@ The codebase carefully tracks sequence lengths through compression stages:
 ### Loss Function
 
 The binomial loss (`loss.py`) models boundary placement as a binomial process:
+
 - Total positions: sequence length
 - Target probability: `target_boundary_counts / total_positions`
 - Actual count: `num_boundaries` (sampled during training)
@@ -154,6 +161,7 @@ The binomial loss (`loss.py`) models boundary placement as a binomial process:
 ### Temperature Scheduling
 
 Temperature for RelaxedBernoulli sampling is scheduled in `pretrain.py:357-368`:
+
 - Starts at 1.0 (soft, stochastic)
 - Decreases linearly to near 0.0 over training
 - Stays 1 step behind to prevent reaching exactly 0.0 (causes NaN)
@@ -162,6 +170,7 @@ Temperature for RelaxedBernoulli sampling is scheduled in `pretrain.py:357-368`:
 ## SpeechBrain Framework
 
 This project uses SpeechBrain's `Brain` class pattern:
+
 - `compute_forward()` - Forward pass through all modules
 - `compute_objectives()` - Loss calculation
 - `on_stage_start()` / `on_stage_end()` - Epoch hooks
@@ -181,6 +190,7 @@ The `dataio_prepare()` function sets up data pipelines with dynamic batching for
 ## Performance Optimization
 
 The codebase is optimized for H100 GPUs:
+
 - BF16 precision training (`precision: bf16`)
 - Dynamic batching with `max_batch_length_train: 2000`
 - Gradient accumulation support
