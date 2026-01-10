@@ -155,7 +155,6 @@ class ASR(sb.core.Brain):
                             f"[DEBUG] CNN parameter {name} has NaN: {torch.isnan(param).any()}, Inf: {torch.isinf(param).any()}")
 
         # === BoundaryPredictor Integration ===
-        # To disable BoundaryPredictor: comment out lines 166-206 below
         # Initialize BP variables (so code works even if BP block is commented out)
         bp_loss = torch.tensor(0.0, device=enc.device)
         num_boundaries = 0
@@ -163,43 +162,43 @@ class ASR(sb.core.Brain):
         boundary_cv = None
         boundary_adjacent_pct = None
 
-        # # Apply BoundaryPredictor
-        # if flags.PRINT_FLOW:
-        #     print(f"[pretrain.py] BEFORE BoundaryPredictor:")
-        # if flags.PRINT_DATA:
-        #     print(f"  enc.shape = {enc.shape}")
-        #     print(f"  enc_lens.shape = {enc_lens.shape}")
-        #     print(f"  enc_lens = {enc_lens}")
+        # Apply BoundaryPredictor
+        if flags.PRINT_FLOW:
+            print(f"[pretrain.py] BEFORE BoundaryPredictor:")
+        if flags.PRINT_DATA:
+            print(f"  enc.shape = {enc.shape}")
+            print(f"  enc_lens.shape = {enc_lens.shape}")
+            print(f"  enc_lens = {enc_lens}")
 
-        # # Compute target boundary counts
-        # if stage == sb.Stage.TRAIN:
-        #     # Count phonemes from text
-        #     target_boundary_counts = count_phonemes_batch(batch.wrd)
+        # Compute target boundary counts
+        if stage == sb.Stage.TRAIN:
+            # Count phonemes from text
+            target_boundary_counts = count_phonemes_batch(batch.wrd)
 
-        #     if flags.PRINT_DATA:
-        #         print(f"[Phoneme Targets] text: {batch.wrd[0][:50]}...")
-        #         print(
-        #             f"[Phoneme Targets] target_counts: {target_boundary_counts[:5]}")
-        # else:
-        #     target_boundary_counts = None
+            if flags.PRINT_DATA:
+                print(f"[Phoneme Targets] text: {batch.wrd[0][:50]}...")
+                print(
+                    f"[Phoneme Targets] target_counts: {target_boundary_counts[:5]}")
+        else:
+            target_boundary_counts = None
 
-        # # Apply BoundaryPredictor with lengths (overwrites enc and enc_lens)
-        # (enc, bp_loss, num_boundaries, total_positions,
-        #  enc_lens, boundary_cv, boundary_adjacent_pct) = self.modules.BoundaryPredictor(
-        #     hidden=enc,
-        #     lengths=enc_lens,
-        #     target_boundary_counts=target_boundary_counts,
-        #     return_unreduced_boundary_loss=False
-        # )
+        # Apply BoundaryPredictor with lengths (overwrites enc and enc_lens)
+        (enc, bp_loss, num_boundaries, total_positions,
+         enc_lens, boundary_cv, boundary_adjacent_pct) = self.modules.BoundaryPredictor(
+            hidden=enc,
+            lengths=enc_lens,
+            target_boundary_counts=target_boundary_counts,
+            return_unreduced_boundary_loss=False
+        )
 
-        # if flags.PRINT_FLOW:
-        #     print(f"[pretrain.py] AFTER BoundaryPredictor:")
-        # if flags.PRINT_DATA:
-        #     print(f"  enc.shape = {enc.shape}")
-        #     print(f"  enc_lens.shape = {enc_lens.shape}")
-        #     print(f"  enc_lens = {enc_lens}")
-        #     print(f"  num_boundaries = {num_boundaries}")
-        #     print(f"  total_positions = {total_positions}")
+        if flags.PRINT_FLOW:
+            print(f"[pretrain.py] AFTER BoundaryPredictor:")
+        if flags.PRINT_DATA:
+            print(f"  enc.shape = {enc.shape}")
+            print(f"  enc_lens.shape = {enc_lens.shape}")
+            print(f"  enc_lens = {enc_lens}")
+            print(f"  num_boundaries = {num_boundaries}")
+            print(f"  total_positions = {total_positions}")
 
         # Store BP outputs for logging
         self.boundary_predictor_loss = bp_loss

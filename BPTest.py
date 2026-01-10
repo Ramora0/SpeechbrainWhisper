@@ -63,38 +63,46 @@ class BoundaryPredictor2(nn.Module):
 
         self.dropout = nn.Dropout(p=0.1)
 
-        # ========== POOLING FEATURES COMMENTED OUT FOR TESTING ==========
-        # # Multi-head attention configuration
-        # self.num_heads = 8
-        # self.head_dim = input_dim // self.num_heads
-        # assert input_dim % self.num_heads == 0, f"input_dim ({input_dim}) must be divisible by num_heads ({self.num_heads})"
+        # Multi-head attention configuration
+        self.num_heads = 8
+        self.head_dim = input_dim // self.num_heads
+        assert input_dim % self.num_heads == 0, f"input_dim ({input_dim}) must be divisible by num_heads ({self.num_heads})"
 
-        # # Learned query vector (shared across all segments)
-        # self.learned_query = nn.Parameter(torch.randn(input_dim))
+        # Learned query vector (shared across all segments) - initialized to zeros for identity-like behavior
+        self.learned_query = nn.Parameter(torch.zeros(input_dim), requires_grad=False)
 
-        # # Key and Value projections
-        # self.pool_key = nn.Linear(input_dim, input_dim, bias=False)
-        # self.pool_value = nn.Linear(input_dim, input_dim, bias=False)
+        # Key and Value projections
+        self.pool_key = nn.Linear(input_dim, input_dim, bias=False)
+        self.pool_value = nn.Linear(input_dim, input_dim, bias=False)
 
-        # # Output projection after pooling (combines heads)
-        # self.pool_output = nn.Linear(input_dim, input_dim, bias=False)
+        # Output projection after pooling (combines heads)
+        self.pool_output = nn.Linear(input_dim, input_dim, bias=False)
 
-        # # LayerNorm for stabilizing attention inputs
-        # self.pool_layernorm = nn.LayerNorm(input_dim)
+        # LayerNorm for stabilizing attention inputs
+        self.pool_layernorm = nn.LayerNorm(input_dim)
 
-        # # Scaling factor for attention scores (per head)
-        # self.pool_scale = self.head_dim ** -0.5
+        # Scaling factor for attention scores (per head)
+        self.pool_scale = self.head_dim ** -0.5
 
-        # # Initialize projections as identity matrices
-        # with torch.no_grad():
-        #     self.pool_key.weight.copy_(torch.eye(input_dim))
-        #     self.pool_value.weight.copy_(torch.eye(input_dim))
-        #     self.pool_output.weight.copy_(torch.eye(input_dim))
+        # Initialize projections as identity matrices
+        with torch.no_grad():
+            self.pool_key.weight.copy_(torch.eye(input_dim))
+            self.pool_value.weight.copy_(torch.eye(input_dim))
+            self.pool_output.weight.copy_(torch.eye(input_dim))
 
-        # self.pool_key.weight._no_reinit = True
-        # self.pool_value.weight._no_reinit = True
-        # self.pool_output.weight._no_reinit = True
-        # ================================================================
+        # Disable learning for all attention pooling parameters
+        self.pool_key.weight.requires_grad = False
+        self.pool_value.weight.requires_grad = False
+        self.pool_output.weight.requires_grad = False
+
+        # Mark as non-reinitializable
+        self.pool_key.weight._no_reinit = True
+        self.pool_value.weight._no_reinit = True
+        self.pool_output.weight._no_reinit = True
+
+        # Disable learning for LayerNorm parameters
+        for param in self.pool_layernorm.parameters():
+            param.requires_grad = False
 
     def set_prior(self, prior):
         self.prior = prior
@@ -121,124 +129,125 @@ class BoundaryPredictor2(nn.Module):
         scheduled_prior = target / (target + schedule * (1.0 - target))
         return scheduled_prior
 
-    # ========== ATTENTION POOLING COMMENTED OUT FOR TESTING ==========
-    # def _attention_pooling(self, boundaries, hidden, lengths):
-    #     """
-    #     Multi-head attention-based pooling using query matrix applied to boundary positions.
+    def _attention_pooling(self, boundaries, hidden, lengths):
+        """
+        Multi-head attention-based pooling using query matrix applied to boundary positions.
 
-    #     Args:
-    #         boundaries: (B, L) - binary boundary indicators
-    #         hidden: (B, L, D) - hidden states
-    #         lengths: (B,) - relative lengths (0.0-1.0) for each sequence
+        Args:
+            boundaries: (B, L) - binary boundary indicators
+            hidden: (B, L, D) - hidden states
+            lengths: (B,) - relative lengths (0.0-1.0) for each sequence
 
-    #     Returns:
-    #         pooled: (B, S, D) - pooled segment representations
-    #     """
-    #     batch_size, seq_len, hidden_dim = hidden.shape
-    #     device = hidden.device
-    #     dtype = hidden.dtype
+        Returns:
+            pooled: (B, S, D) - pooled segment representations
+        """
+        batch_size, seq_len, hidden_dim = hidden.shape
+        device = hidden.device
+        dtype = hidden.dtype
 
-    #     if flags.PRINT_FLOW:
-    #         print(f"[BoundaryPredictor.py] _attention_pooling INPUT:")
-    #     if flags.PRINT_DATA:
-    #         print(f"  boundaries.shape = {boundaries.shape}")
-    #         print(f"  hidden.shape = {hidden.shape}")
-    #         print(f"  lengths = {lengths}")
+        if flags.PRINT_FLOW:
+            print(f"[BoundaryPredictor.py] _attention_pooling INPUT:")
+        if flags.PRINT_DATA:
+            print(f"  boundaries.shape = {boundaries.shape}")
+            print(f"  hidden.shape = {hidden.shape}")
+            print(f"  lengths = {lengths}")
 
-    #     # Step 1: Create segment assignment matrix using existing logic
-    #     foo = common(boundaries)  # B x L x S
+        # Step 1: Create segment assignment matrix using existing logic
+        foo = common(boundaries)  # B x L x S
 
-    #     if flags.PRINT_FLOW:
-    #         print(f"[BoundaryPredictor.py] After common():")
-    #     if flags.PRINT_DATA:
-    #         print(
-    #             f"  foo = {foo if foo is None else f'tensor with shape {foo.shape}'}")
+        if flags.PRINT_FLOW:
+            print(f"[BoundaryPredictor.py] After common():")
+        if flags.PRINT_DATA:
+            print(
+                f"  foo = {foo if foo is None else f'tensor with shape {foo.shape}'}")
 
-    #     if foo is None:
-    #         # No boundaries found
-    #         if flags.PRINT_FLOW:
-    #             print(
-    #                 f"[BoundaryPredictor.py] No boundaries found, returning empty tensor")
-    #         return torch.empty(batch_size, 0, hidden_dim, device=device, dtype=dtype)
+        if foo is None:
+            # No boundaries found
+            if flags.PRINT_FLOW:
+                print(
+                    f"[BoundaryPredictor.py] No boundaries found, returning empty tensor")
+            return torch.empty(batch_size, 0, hidden_dim, device=device, dtype=dtype)
 
-    #     max_segments = foo.size(2)  # S
-    #     if flags.PRINT_DATA:
-    #         print(f"[BoundaryPredictor.py] max_segments = {max_segments}")
+        max_segments = foo.size(2)  # S
+        if flags.PRINT_DATA:
+            print(f"[BoundaryPredictor.py] max_segments = {max_segments}")
 
-    #     # Step 2: Create binary segment mask (B x L x S)
-    #     segment_mask = (foo == 0).float()  # B x L x S
+        # Step 2: Create binary segment mask (B x L x S)
+        segment_mask = (foo == 0).float()  # B x L x S
 
-    #     # Compute actual lengths for each batch item
-    #     actual_lens = (lengths * seq_len).long()
+        # Compute actual lengths for each batch item
+        actual_lens = (lengths * seq_len).long()
 
-    #     # Create length mask for segment_mask
-    #     length_mask = torch.zeros(batch_size, seq_len, device=device)
-    #     for i in range(batch_size):
-    #         length_mask[i, :actual_lens[i]] = 1.0
+        # Create length mask for segment_mask
+        length_mask = torch.zeros(batch_size, seq_len, device=device)
+        for i in range(batch_size):
+            length_mask[i, :actual_lens[i]] = 1.0
 
-    #     # Apply length mask to segment_mask
-    #     segment_mask = segment_mask * length_mask.unsqueeze(-1)
+        # Apply length mask to segment_mask
+        segment_mask = segment_mask * length_mask.unsqueeze(-1)
 
-    #     # Step 3: Use learned query vector for all segments
-    #     # Expand learned query to (B, S, D) - same query for all segments in all batches
-    #     queries = self.learned_query.unsqueeze(0).unsqueeze(
-    #         0).expand(batch_size, max_segments, -1)  # (B, S, D)
+        # Step 3: Use learned query vector for all segments
+        # Expand learned query to (B, S, D) - same query for all segments in all batches
+        queries = self.learned_query.unsqueeze(0).unsqueeze(
+            0).expand(batch_size, max_segments, -1)  # (B, S, D)
 
-    #     # Step 4: Reshape queries for multi-head attention
-    #     queries = queries.view(batch_size, max_segments, self.num_heads,
-    #                            # (B, H, S, head_dim)
-    #                            self.head_dim).transpose(1, 2)
+        # Step 4: Reshape queries for multi-head attention
+        queries = queries.view(batch_size, max_segments, self.num_heads,
+                               # (B, H, S, head_dim)
+                               self.head_dim).transpose(1, 2)
 
-    #     # Step 5: Apply LayerNorm before projecting to keys and values
-    #     hidden_normed = self.pool_layernorm(hidden)  # (B, L, D)
+        # Step 5: Apply LayerNorm before projecting to keys and values
+        # DISABLED FOR IDENTITY BEHAVIOR: LayerNorm normalizes to mean=0, std=1
+        # which changes values significantly, even with frozen params
+        # hidden_normed = self.pool_layernorm(hidden)  # (B, L, D)
+        hidden_normed = hidden  # Bypass LayerNorm for true identity behavior
 
-    #     # Step 6: Project to keys and values and reshape for multi-head
-    #     keys = self.pool_key(hidden_normed)      # (B, L, D)
-    #     keys = keys.view(batch_size, seq_len, self.num_heads,
-    #                      self.head_dim).transpose(1, 2)  # (B, H, L, head_dim)
+        # Step 6: Project to keys and values and reshape for multi-head
+        keys = self.pool_key(hidden_normed)      # (B, L, D)
+        keys = keys.view(batch_size, seq_len, self.num_heads,
+                         self.head_dim).transpose(1, 2)  # (B, H, L, head_dim)
 
-    #     values = self.pool_value(hidden_normed)  # (B, L, D)
-    #     values = values.view(batch_size, seq_len, self.num_heads,
-    #                          # (B, H, L, head_dim)
-    #                          self.head_dim).transpose(1, 2)
+        values = self.pool_value(hidden_normed)  # (B, L, D)
+        values = values.view(batch_size, seq_len, self.num_heads,
+                             # (B, H, L, head_dim)
+                             self.head_dim).transpose(1, 2)
 
-    #     # Step 7: Compute attention scores: queries @ keys
-    #     # queries: (B, H, S, head_dim), keys: (B, H, L, head_dim) -> (B, H, S, L)
-    #     attn_scores = torch.matmul(
-    #         queries, keys.transpose(-2, -1))  # (B, H, S, L)
-    #     attn_scores = attn_scores * self.pool_scale
+        # Step 7: Compute attention scores: queries @ keys
+        # queries: (B, H, S, head_dim), keys: (B, H, L, head_dim) -> (B, H, S, L)
+        attn_scores = torch.matmul(
+            queries, keys.transpose(-2, -1))  # (B, H, S, L)
+        attn_scores = attn_scores * self.pool_scale
 
-    #     # Step 8: Mask out positions not in segment
-    #     # segment_mask is (B, L, S), we need (B, 1, S, L) for broadcasting across heads
-    #     segment_mask_transposed = segment_mask.transpose(
-    #         1, 2).unsqueeze(1)  # (B, 1, S, L)
-    #     attn_scores = attn_scores.masked_fill(
-    #         segment_mask_transposed == 0, float('-inf'))
+        # Step 8: Mask out positions not in segment
+        # segment_mask is (B, L, S), we need (B, 1, S, L) for broadcasting across heads
+        segment_mask_transposed = segment_mask.transpose(
+            1, 2).unsqueeze(1)  # (B, 1, S, L)
+        attn_scores = attn_scores.masked_fill(
+            segment_mask_transposed == 0, float('-inf'))
 
-    #     # Step 9: Compute attention weights per segment
-    #     attn_weights = F.softmax(attn_scores, dim=-1)  # (B, H, S, L)
-    #     attn_weights = torch.nan_to_num(attn_weights, nan=0.0)
+        # Step 9: Compute attention weights per segment
+        attn_weights = F.softmax(attn_scores, dim=-1)  # (B, H, S, L)
+        attn_weights = torch.nan_to_num(attn_weights, nan=0.0)
 
-    #     # Step 10: Apply attention: (B, H, S, L) @ (B, H, L, head_dim) -> (B, H, S, head_dim)
-    #     pooled = torch.matmul(attn_weights, values)  # (B, H, S, head_dim)
+        # Step 10: Apply attention: (B, H, S, L) @ (B, H, L, head_dim) -> (B, H, S, head_dim)
+        pooled = torch.matmul(attn_weights, values)  # (B, H, S, head_dim)
 
-    #     # Step 11: Concatenate heads back together
-    #     pooled = pooled.transpose(1, 2).contiguous()  # (B, S, H, head_dim)
-    #     pooled = pooled.flatten(2)  # (B, S, H*head_dim) -> (B, S, D)
+        # Step 11: Concatenate heads back together
+        pooled = pooled.transpose(1, 2).contiguous()  # (B, S, H, head_dim)
+        pooled = pooled.flatten(2)  # (B, S, H*head_dim) -> (B, S, D)
 
-    #     # Step 12: Output projection to combine information from all heads
-    #     pooled = self.pool_output(pooled)
+        # Step 12: Output projection to combine information from all heads
+        pooled = self.pool_output(pooled)
 
-    #     # Ensure output maintains same dtype as input
-    #     pooled = pooled.to(dtype=dtype)
+        # Ensure output maintains same dtype as input
+        pooled = pooled.to(dtype=dtype)
 
-    #     if flags.PRINT_FLOW:
-    #         print(f"[BoundaryPredictor.py] _attention_pooling OUTPUT:")
-    #     if flags.PRINT_DATA:
-    #         print(f"  pooled.shape = {pooled.shape}")
+        if flags.PRINT_FLOW:
+            print(f"[BoundaryPredictor.py] _attention_pooling OUTPUT:")
+        if flags.PRINT_DATA:
+            print(f"  pooled.shape = {pooled.shape}")
 
-    #     return pooled  # B x S x D
-    # ================================================================
+        return pooled  # B x S x D
 
     def _simple_average_pooling(self, boundaries, hidden, lengths):
         """
@@ -442,21 +451,9 @@ class BoundaryPredictor2(nn.Module):
             print(
                 f"  hard_boundaries sum per sample = {hard_boundaries.sum(dim=1)}")
 
-        # ========== ZERO OUT PADDED POSITIONS IN HIDDEN STATES ==========
-        # Apply length masking to hidden states (zero out padding)
-        # hard_boundaries is (B, L) with 1s for valid positions, 0s for padding
-        hidden_masked = hidden * hard_boundaries.unsqueeze(-1)  # (B, L, D) * (B, L, 1) -> (B, L, D)
-        # ================================================================
-
-        # ========== POOLING COMPLETELY BYPASSED FOR TESTING ==========
-        # Just return the masked hidden states directly (no compression)
-        pooled = hidden_masked
-        # ================================================================
-
-        # # ========== USING SIMPLE POOLING INSTEAD OF ATTENTION ==========
-        # pooled = self._simple_average_pooling(
-        #     hard_boundaries, hidden, lengths)
-        # # ================================================================
+        # Apply attention pooling
+        pooled = self._attention_pooling(
+            hard_boundaries, hidden, lengths)
 
         if flags.PRINT_FLOW:
             print(f"[BoundaryPredictor.py] AFTER pooling:")
@@ -492,55 +489,42 @@ class BoundaryPredictor2(nn.Module):
         #     print(f"    self.similarity_bias = {self.similarity_bias.item()}")
         #     print(f"{'='*80}\n")
 
-        # ========== SHORTENED LENGTHS: NO COMPRESSION, SO SAME AS INPUT ==========
-        # Since we're bypassing compression, output lengths = input lengths
-        shortened_lengths = lengths.clone()
-        # =========================================================================
+        # Compute shortened lengths based on boundary positions
+        batch_size = hard_boundaries.shape[0]
+        seq_len = hidden.shape[1]
+        actual_lens = (lengths * seq_len).long()
 
-        # # Compute shortened lengths based on boundary positions
-        # batch_size = hard_boundaries.shape[0]
-        # seq_len = hidden.shape[1]
-        # actual_lens = (lengths * seq_len).long()
+        if flags.PRINT_FLOW:
+            print(f"[BoundaryPredictor.py] Computing shortened_lengths:")
+        if flags.PRINT_DATA:
+            print(f"  batch_size = {batch_size}")
+            print(f"  seq_len (hidden) = {seq_len}")
+            print(f"  actual_lens = {actual_lens}")
 
-        # if flags.PRINT_FLOW:
-        #     print(f"[BoundaryPredictor.py] Computing shortened_lengths:")
-        # if flags.PRINT_DATA:
-        #     print(f"  batch_size = {batch_size}")
-        #     print(f"  seq_len (hidden) = {seq_len}")
-        #     print(f"  actual_lens = {actual_lens}")
+        # Get the actual pooled sequence length from the pooled tensor
+        max_segments = pooled.shape[1] if pooled.shape[1] > 0 else 1
 
-        # # Get the actual pooled sequence length from the pooled tensor
-        # max_segments = pooled.shape[1] if pooled.shape[1] > 0 else 1
+        if flags.PRINT_DATA:
+            print(f"  max_segments (from pooled) = {max_segments}")
 
-        # if flags.PRINT_DATA:
-        #     print(f"  max_segments (from pooled) = {max_segments}")
+        shortened_lengths = torch.zeros(batch_size, device=hidden.device)
+        for b in range(batch_size):
+            # Count boundaries within valid length
+            valid_len = actual_lens[b].item()
+            num_boundaries = hard_boundaries[b, :valid_len].sum().item()
+            # With all 1s boundaries, num_boundaries should equal valid_len
+            # Each position becomes its own segment
+            if num_boundaries > 0 and max_segments > 0:
+                # The number of segments equals the number of boundaries (since all positions are boundaries)
+                num_segments = min(int(num_boundaries), max_segments)
+                # Compute relative length
+                shortened_lengths[b] = num_segments / max_segments
+            else:
+                shortened_lengths[b] = 0.0
 
-        # shortened_lengths = torch.zeros(batch_size, device=hidden.device)
-        # for b in range(batch_size):
-        #     # Count boundaries within valid length
-        #     valid_len = actual_lens[b].item()
-        #     num_boundaries = hard_boundaries[b, :valid_len].sum().item()
-        #     # N boundaries create N+1 segments (including the final segment)
-        #     # But since the pooling already accounts for this, we just need to count
-        #     # how many pooled segments are valid for this sample
-        #     if num_boundaries > 0 and max_segments > 0:
-        #         # The number of segments is num_boundaries (since each boundary ends a segment)
-        #         # But we need to check if this sample uses all max_segments positions
-        #         # by comparing against max_segments - 1 (since max boundaries = max_segments - 1)
-        #         # Actually, if we have max_segments positions in output, and num_boundaries boundaries,
-        #         # we need to map this correctly
-        #         num_segments = min(num_boundaries, max_segments)
-        #         # Ensure at least one sample reaches 1.0 if it has the maximum boundaries
-        #         if num_boundaries >= max_segments - 1:
-        #             shortened_lengths[b] = 1.0
-        #         else:
-        #             shortened_lengths[b] = (num_boundaries + 1) / max_segments
-        #     else:
-        #         shortened_lengths[b] = 0.0
-
-        # if flags.PRINT_DATA:
-        #     print(
-        #         f"[BoundaryPredictor.py] shortened_lengths = {shortened_lengths}")
+        if flags.PRINT_DATA:
+            print(
+                f"[BoundaryPredictor.py] shortened_lengths = {shortened_lengths}")
 
         # ERROR CHECK: Detect if any sequence has zero-length output
         # zero_length_mask = (shortened_lengths == 0.0)
