@@ -125,26 +125,28 @@ class ASR(sb.core.Brain):
                         f"[DEBUG] After fea_augment: feats has NaN: {torch.isnan(feats).any()}")
 
         # forward modules
-        src = self.modules.CNN(feats)
+        enc = self.modules.CNN(feats)
+        enc_lens = wav_lens
+
         if flags.PRINT_NAN_INF:
             print(
-                f"[DEBUG] After CNN: src has NaN: {torch.isnan(src).any()}, shape: {src.shape}")
+                f"[DEBUG] After CNN: enc has NaN: {torch.isnan(enc).any()}, shape: {enc.shape}")
 
         # Reshape CNN output from 4D to 3D (same logic as TransformerASR.encode)
         # CNN outputs (batch, time, ch1, ch2) and we reshape to (batch, time, ch1*ch2)
-        if src.dim() == 4:
-            bz, t, ch1, ch2 = src.shape
-            src = src.reshape(bz, t, ch1 * ch2)
+        if enc.dim() == 4:
+            bz, t, ch1, ch2 = enc.shape
+            enc = enc.reshape(bz, t, ch1 * ch2)
 
         if flags.PRINT_NAN_INF:
             print(
-                f"[DEBUG] After reshape: src has NaN: {torch.isnan(src).any()}, has Inf: {torch.isinf(src).any()}")
-        if torch.isnan(src).any() or torch.isinf(src).any():
+                f"[DEBUG] After reshape: enc has NaN: {torch.isnan(enc).any()}, has Inf: {torch.isinf(enc).any()}")
+        if torch.isnan(enc).any() or torch.isinf(enc).any():
             if flags.PRINT_NAN_INF:
-                print(f"[DEBUG] src stats: min={src[~torch.isnan(src) & ~torch.isinf(src)].min() if (~torch.isnan(src) & ~torch.isinf(src)).any() else 'N/A'}, "
-                      f"max={src[~torch.isnan(src) & ~torch.isinf(src)].max() if (~torch.isnan(src) & ~torch.isinf(src)).any() else 'N/A'}")
+                print(f"[DEBUG] enc stats: min={enc[~torch.isnan(enc) & ~torch.isinf(enc)].min() if (~torch.isnan(enc) & ~torch.isinf(enc)).any() else 'N/A'}, "
+                      f"max={enc[~torch.isnan(enc) & ~torch.isinf(enc)].max() if (~torch.isnan(enc) & ~torch.isinf(enc)).any() else 'N/A'}")
                 print(
-                    f"[DEBUG] Number of NaN values: {torch.isnan(src).sum()}, Inf values: {torch.isinf(src).sum()}")
+                    f"[DEBUG] Number of NaN values: {torch.isnan(enc).sum()}, Inf values: {torch.isinf(enc).sum()}")
             # Check CNN parameters
             for name, param in self.modules.CNN.named_parameters():
                 if torch.isnan(param).any() or torch.isinf(param).any():
@@ -152,61 +154,52 @@ class ASR(sb.core.Brain):
                         print(
                             f"[DEBUG] CNN parameter {name} has NaN: {torch.isnan(param).any()}, Inf: {torch.isinf(param).any()}")
 
-        # === BoundaryPredictor2 Integration ===
-        batch_size, src_seq_len, src_dim = src.shape
+        # === BoundaryPredictor Integration ===
+        # To disable BoundaryPredictor: comment out lines 166-206 below
+        # Initialize BP variables (so code works even if BP block is commented out)
+        bp_loss = torch.tensor(0.0, device=enc.device)
+        num_boundaries = 0
+        total_positions = 0
+        boundary_cv = None
+        boundary_adjacent_pct = None
 
-        if flags.PRINT_FLOW:
-            print(f"[pretrain.py] BEFORE BoundaryPredictor:")
-        if flags.PRINT_DATA:
-            print(f"  src.shape = {src.shape}")
-            print(f"  wav_lens.shape = {wav_lens.shape}")
-            print(f"  wav_lens = {wav_lens}")
+        # # Apply BoundaryPredictor
+        # if flags.PRINT_FLOW:
+        #     print(f"[pretrain.py] BEFORE BoundaryPredictor:")
+        # if flags.PRINT_DATA:
+        #     print(f"  enc.shape = {enc.shape}")
+        #     print(f"  enc_lens.shape = {enc_lens.shape}")
+        #     print(f"  enc_lens = {enc_lens}")
 
-        # Compute target boundary counts
-        if stage == sb.Stage.TRAIN:
-            # print("phonemez")
-            # Count phonemes from text
-            target_boundary_counts = count_phonemes_batch(batch.wrd)
-            # actual_lens = (wav_lens * src_seq_len).long()
+        # # Compute target boundary counts
+        # if stage == sb.Stage.TRAIN:
+        #     # Count phonemes from text
+        #     target_boundary_counts = count_phonemes_batch(batch.wrd)
 
-            # Clip to valid range [1, actual_lens]
-            # target_boundary_counts = torch.clamp(
-            #     phoneme_counts,
-            #     min=1.0,
-            #     max=actual_lens.float()
-            # ).to(src.device)
+        #     if flags.PRINT_DATA:
+        #         print(f"[Phoneme Targets] text: {batch.wrd[0][:50]}...")
+        #         print(
+        #             f"[Phoneme Targets] target_counts: {target_boundary_counts[:5]}")
+        # else:
+        #     target_boundary_counts = None
 
-            # actual_lens = (wav_lens * src_seq_len).long()
-            # target_boundary_counts = (actual_lens.float() *
-            #                           self.hparams.boundary_predictor_prior)
-            # target_boundary_counts = target_boundary_counts.to(src.device)
+        # # Apply BoundaryPredictor with lengths (overwrites enc and enc_lens)
+        # (enc, bp_loss, num_boundaries, total_positions,
+        #  enc_lens, boundary_cv, boundary_adjacent_pct) = self.modules.BoundaryPredictor(
+        #     hidden=enc,
+        #     lengths=enc_lens,
+        #     target_boundary_counts=target_boundary_counts,
+        #     return_unreduced_boundary_loss=False
+        # )
 
-            if flags.PRINT_DATA:
-                print(f"[Phoneme Targets] text: {batch.wrd[0][:50]}...")
-                print(
-                    f"[Phoneme Targets] phoneme_counts: {phoneme_counts[:5]}")
-                print(
-                    f"[Phoneme Targets] target_counts: {target_boundary_counts[:5]}")
-        else:
-            target_boundary_counts = None
-
-        # Apply BoundaryPredictor2 with lengths
-        (bp_out, bp_loss, num_boundaries, total_positions,
-         bp_wav_lens, boundary_cv, boundary_adjacent_pct) = self.modules.BoundaryPredictor(
-            hidden=src,
-            lengths=wav_lens,
-            target_boundary_counts=target_boundary_counts,
-            return_unreduced_boundary_loss=False
-        )
-
-        if flags.PRINT_FLOW:
-            print(f"[pretrain.py] AFTER BoundaryPredictor:")
-        if flags.PRINT_DATA:
-            print(f"  bp_out.shape = {bp_out.shape}")
-            print(f"  bp_wav_lens.shape = {bp_wav_lens.shape}")
-            print(f"  bp_wav_lens = {bp_wav_lens}")
-            print(f"  num_boundaries = {num_boundaries}")
-            print(f"  total_positions = {total_positions}")
+        # if flags.PRINT_FLOW:
+        #     print(f"[pretrain.py] AFTER BoundaryPredictor:")
+        # if flags.PRINT_DATA:
+        #     print(f"  enc.shape = {enc.shape}")
+        #     print(f"  enc_lens.shape = {enc_lens.shape}")
+        #     print(f"  enc_lens = {enc_lens}")
+        #     print(f"  num_boundaries = {num_boundaries}")
+        #     print(f"  total_positions = {total_positions}")
 
         # Store BP outputs for logging
         self.boundary_predictor_loss = bp_loss
@@ -214,19 +207,30 @@ class ASR(sb.core.Brain):
         self.total_positions = total_positions
         self.boundary_cv = boundary_cv
         self.boundary_adjacent_pct = boundary_adjacent_pct
+        # === End BoundaryPredictor Integration ===
+
+        # Explicitly zero out padding positions
+        # batch_size, seq_len, hidden_dim = enc.shape
+        # # Create mask: True for valid positions, False for padding
+        # lengths_abs = (enc_lens * seq_len).long()
+        # mask = torch.arange(seq_len, device=enc.device).unsqueeze(
+        #     0) < lengths_abs.unsqueeze(1)
+        # # Expand mask to match hidden dimension and zero out padding
+        # mask = mask.unsqueeze(-1).expand_as(enc)
+        # enc = enc * mask.float()
 
         if flags.PRINT_FLOW:
             print(f"[pretrain.py] BEFORE Transformer:")
         if flags.PRINT_DATA:
-            print(f"  bp_out.shape = {bp_out.shape}")
+            print(f"  enc.shape = {enc.shape}")
             print(f"  tokens_bos.shape = {tokens_bos.shape}")
-            print(f"  bp_wav_lens.shape = {bp_wav_lens.shape}")
-            print(f"  bp_wav_lens = {bp_wav_lens}")
+            print(f"  enc_lens.shape = {enc_lens.shape}")
+            print(f"  enc_lens = {enc_lens}")
             print(
-                f"  bp_wav_lens min/max = {bp_wav_lens.min().item():.4f} / {bp_wav_lens.max().item():.4f}")
+                f"  enc_lens min/max = {enc_lens.min().item():.4f} / {enc_lens.max().item():.4f}")
 
         enc_out, pred = self.modules.Transformer(
-            bp_out, tokens_bos, bp_wav_lens, pad_idx=self.hparams.pad_index
+            enc, tokens_bos, enc_lens, pad_idx=self.hparams.pad_index
         )
 
         # output layer for ctc log-probabilities
@@ -253,19 +257,19 @@ class ASR(sb.core.Brain):
             # Decide searcher for inference: valid or test search
             if stage == sb.Stage.VALID:
                 hyps, _, _, _ = self.hparams.valid_search(
-                    enc_out.detach(), bp_wav_lens
+                    enc_out.detach(), enc_lens
                 )
             else:
                 hyps, _, _, _ = self.hparams.test_search(
-                    enc_out.detach(), bp_wav_lens
+                    enc_out.detach(), enc_lens
                 )
 
-        return p_ctc, p_seq, bp_wav_lens, hyps
+        return p_ctc, p_seq, enc_lens, hyps
 
     def compute_objectives(self, predictions, batch, stage):
         """Computes the loss (CTC+NLL) given predictions and targets."""
 
-        (p_ctc, p_seq, wav_lens, hyps) = predictions
+        (p_ctc, p_seq, enc_lens, hyps) = predictions
 
         ids = batch.id
         tokens_eos, tokens_eos_lens = batch.tokens_eos
@@ -295,7 +299,7 @@ class ASR(sb.core.Brain):
         ).sum()
 
         loss_ctc = self.hparams.ctc_cost(
-            p_ctc, tokens, wav_lens, tokens_lens
+            p_ctc, tokens, enc_lens, tokens_lens
         ).sum()
 
         # Add boundary predictor loss

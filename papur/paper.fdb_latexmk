@@ -1,6 +1,6 @@
 # Fdb version 4
-["pdflatex"] 1767990213.47424 "/Users/leedavis/coding/Python/AI/SpeechbrainWhisper/papur/paper.tex" "paper.pdf" "paper" 1767990213.70624 2
-  "/Users/leedavis/coding/Python/AI/SpeechbrainWhisper/papur/paper.tex" 1767990197.5803 32532 138f881c2445eccb84b4653d8d65b7ab ""
+["pdflatex"] 1767996836.89181 "/Users/leedavis/coding/Python/AI/SpeechbrainWhisper/papur/paper.tex" "paper.pdf" "paper" 1767996837.13306 2
+  "/Users/leedavis/coding/Python/AI/SpeechbrainWhisper/papur/paper.tex" 1767996836.27677 37487 f6c5acc300138b217a0d43bc3f01cc3d ""
   "/usr/local/texlive/2025basic/texmf-dist/tex/generic/atbegshi/atbegshi.sty" 1575674566 24708 5584a51a7101caf7e6bbf1fc27d8f7b1 ""
   "/usr/local/texlive/2025basic/texmf-dist/tex/generic/bigintcalc/bigintcalc.sty" 1576625341 40635 c40361e206be584d448876bba8a64a3b ""
   "/usr/local/texlive/2025basic/texmf-dist/tex/generic/bitset/bitset.sty" 1576016050 33961 6b5c75130e435b2bfdb9f480a09a39f9 ""
@@ -60,8 +60,8 @@
   "fancyhdr.sty" 1767990133.97785 20521 e5d13d98d57bd53d4fed3aa61bd29c86 ""
   "forloop.sty" 0 -1 0 ""
   "icml2025.sty" 1767989904.2062 28139 f5c678f69b3c5a59b713c3d382dd393c ""
-  "paper.aux" 1767990205.47322 32 3985256e7290058c681f74d7a3565a19 "pdflatex"
-  "paper.tex" 1767990197.5803 32532 138f881c2445eccb84b4653d8d65b7ab ""
+  "paper.aux" 0 -1 0 "pdflatex"
+  "paper.tex" 1767996836.27677 37487 f6c5acc300138b217a0d43bc3f01cc3d ""
   (generated)
   "paper.aux"
   "paper.log"

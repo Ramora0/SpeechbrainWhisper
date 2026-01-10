@@ -1,3 +1,5 @@
+%%%%%%%% ICML 2025 EXAMPLE LATEX SUBMISSION FILE %%%%%%%%%%%%%%%%%
+
 \documentclass{article}
 
 % Recommended, but optional, packages for figures and better typesetting:
@@ -271,20 +273,7 @@ This mapping ensures $p_t \in [0,1]$ and directly ties boundary probabilities to
 
 \subsection{Differentiable Sampling}
 \label{sec:lapse_sampling}
-Boundaries are discrete, so during training we employ a differentiable Gumbel--Bernoulli estimator. Let $b_t \in \{0,1\}$ indicate a boundary \emph{after} frame $t$. We sample a relaxed boundary $\tilde{b}_t \in (0,1)$ as
-\begin{equation}
-\tilde{b}_t = \sigma\!\left(\frac{\log p_t - \log(1-p_t) + g_t}{\tau}\right),
-\qquad g_t \sim \mathrm{Gumbel}(0,1),
-\end{equation}
-where $\tau>0$ is a temperature annealed from 1 to 0 over training. To obtain discrete boundaries in the forward pass while preserving gradients, we use a straight-through estimator:
-\begin{equation}
-b_t^{\mathrm{hard}} = \mathbb{I}[\tilde{b}_t > 0.5], \qquad
-b_t = \mathrm{stopgrad}(b_t^{\mathrm{hard}} - \tilde{b}_t) + \tilde{b}_t.
-\end{equation}
-At inference time, we perform deterministic segmentation by thresholding:
-\begin{equation}
-b_t = \mathbb{I}[p_t > 0.5].
-\end{equation}
+To obtain discrete boundaries $b_t \in \{0,1\}$ while enabling end-to-end training, we use the straight-through Gumbel-Sigmoid estimator \cite{jang2016categorical,maddison2016concrete}. During training, we sample $b_t$ from the Bernoulli distribution parameterized by $p_t$ using the reparameterization trick, allowing gradients to flow through the discrete samples. At inference, we simply threshold $p_t > 0.5$.
 
 The boundary sequence $\{b_t\}_{t=1}^{T-1}$ partitions the frames into $M$ contiguous segments. Let the segments be indexed by $(\ell_m, r_m)$, where
 \begin{equation}
@@ -318,17 +307,16 @@ This mechanism allows the model to select the most information across frames wit
 % Replace Sec. 3.5 (Rate control) with this version
 % =========================
 
-\subsection{Rate control via binomial loss on sampled boundary counts}
+\subsection{Compression Rate Control}
 \label{sec:lapse_rate_control}
-A key goal of LAPSE is \emph{controllable} compression. We derive a target segment count $N^\star$ from the transcript using an external phonemizer, where $N^\star$ corresponds to either the phoneme count (phoneme-level) or syllable count (syllable-level). Since each boundary variable $b_t \in \{0,1\}$ indicates a split \emph{after} frame $t$, the number of segments is
+Due to our boundary predictor optimizer, without explicit rate supervision, compression collapses to 0 or infinity. To target linguistically inspired boundaries with minimal supervision, we derive a target segment count $N^\star$ from the transcript using an external phonemizer, where $N^\star$ corresponds to either the phoneme count (phoneme-level) or syllable count (syllable-level). Since each boundary variable $b_t \in \{0,1\}$ indicates a split \emph{after} frame $t$, the number of segments is
 \begin{equation}
 M \;=\; 1 + \sum_{t=1}^{T-1} b_t,
 \qquad
 B \;=\; \sum_{t=1}^{T-1} b_t \;=\; M-1,
 \end{equation}
 where $B$ is the number of sampled boundaries.
-
-Unlike approaches that regularize the \emph{probabilities} $p_t$, we apply a \textbf{binomial loss directly to the sampled boundary count} $B$ produced by the (straight-through) Gumbel--Bernoulli sampler (Section~\ref{sec:lapse_sampling}). Concretely, let the target number of boundaries be
+We apply a binomial loss directly to the sampled boundary count $B$ produced by the (straight-through) Gumbel--Bernoulli sampler (Section~\ref{sec:lapse_sampling}). Concretely, let the target number of boundaries be
 \begin{equation}
 B^\star \;=\; N^\star - 1,
 \end{equation}
@@ -340,37 +328,79 @@ We then penalize deviations from the desired count using the negative log-likeli
 \begin{equation}
 \mathcal{L}_{\mathrm{count}}
 \;=\;
--\log \mathrm{BinomPMF}\!\left(B;\, T-1,\, \rho^\star\right)
-\;=\;
--\log \left[
-\binom{T-1}{B} (\rho^\star)^B (1-\rho^\star)^{(T-1-B)}
-\right].
+-\log \mathrm{Binomial}(B \mid T-1,\, \rho^\star).
 \label{eq:lapse_binom_count}
 \end{equation}
 This loss enforces a global compression rate while allowing the model to freely choose \emph{where} boundaries occur based on local acoustics.
 
-\paragraph{Backpropagation through sampled counts.}
-Although $\mathcal{L}_{\mathrm{count}}$ is computed from the discrete sampled count $B=\sum_t b_t^{\mathrm{hard}}$, gradients flow to the boundary predictor through the straight-through construction used in sampling (Section~\ref{sec:lapse_sampling}), i.e.,
-\[
-b_t \;=\; \mathrm{stopgrad}(b_t^{\mathrm{hard}}-\tilde b_t)+\tilde b_t,
-\]
-so the forward pass uses discrete boundaries while the backward pass uses the relaxed samples $\tilde b_t$.
-
 \paragraph{Targets.}
 We consider two operating points:
-(i) \textbf{phoneme-rate} targets, where $N^\star$ is the phoneme count (empirically targeting $\sim 10.4\times$ compression relative to the pre-LAPSE frame rate), and
-(ii) \textbf{syllable-rate} targets, where $N^\star$ is the syllable count (targeting $\sim 28\times$ compression).
+(i) \textbf{phoneme-rate} targets, where $N^\star$ is the phoneme count (empirically targeting $\sim 10.4\times$ compression relative to the 10~ms input frame stride, i.e., $\sim 104$~ms per segment), and
+(ii) \textbf{syllable-rate} targets, where $N^\star$ is the syllable count (targeting $\sim 28\times$ compression, i.e., $\sim 280$~ms per segment).
 
-
-
-\subsection{Training Objective}
+\subsection{Training objective}
 \label{sec:lapse_objective}
-LAPSE is trained end-to-end with a standard CTC loss computed from the downstream encoder outputs and the transcript, augmented with the count loss:
+LAPSE is trained end-to-end using (i) a CTC loss, (ii) an autoregressive decoder trained with standard cross-entropy, and (iii) the binomial count loss that controls compression (Section~\ref{sec:lapse_rate_control}). Let $\mathcal{L}_{\mathrm{CTC}}$ denote the CTC objective computed from the encoder outputs, and let $\mathcal{L}_{\mathrm{CE}}$ denote the token-level cross-entropy loss of the ASR decoder over the target transcript tokens. We combine the recognition losses with fixed weights:
 \begin{equation}
-\mathcal{L} = \mathcal{L}_{\mathrm{CTC}} + \lambda \, \mathcal{L}_{\mathrm{count}},
+\mathcal{L}_{\mathrm{rec}} \;=\; 0.3\,\mathcal{L}_{\mathrm{CTC}} \;+\; 0.7\,\mathcal{L}_{\mathrm{CE}}.
+\label{eq:lapse_recognition_loss}
 \end{equation}
-where $\lambda$ is a scalar weight controlling the strength of rate control. We consider two operating points: a phoneme-level target regime (approximately $10.4\times$ compression relative to the pre-LAPSE frame rate) and a syllable-level regime (approximately $28\times$ compression).
+We then add the compression rate-control term:
+\begin{equation}
+\mathcal{L} \;=\; \mathcal{L}_{\mathrm{rec}} \;+\; \lambda\,\mathcal{L}_{\mathrm{count}},
+\label{eq:lapse_full_objective}
+\end{equation}
+where $\mathcal{L}_{\mathrm{count}}$ is the binomial loss on sampled boundary counts defined in Eq.~\eqref{eq:lapse_binom_count}, and $\lambda$ controls the strength of rate control relative to recognition.
 
+
+\section{Experimental Setup}
+\label{sec:experimental_setup}
+
+\subsection{Datasets}
+We evaluate LAPSE primarily on LibriSpeech 960h in the fully supervised ASR setting. We report results on the standard test-clean and test-other evaluation sets, and use dev-clean/dev-other for validation and model selection. Audio is resampled to 16 kHz and represented as 80-channel log-mel filterbank features computed with 25ms windows and 10ms stride. We apply standard speech augmentations during training, including Speed Perturbation (95\%, 100\%, 105\%) and SpecAugment (time masking, frequency masking, and time warping).
+
+To test whether learned segmentation generalizes beyond ASR, we additionally run a small-scale speech-to-text translation experiment on [TBD dataset: e.g., MuST-C / CoVoST2 / IWSLT], reusing the same LAPSE module and training recipe except for the task-specific output vocabulary and objective.
+
+\subsection{Model architecture}
+Our base model is a Conformer encoder-decoder trained from scratch with approximately 120M parameters. LAPSE is inserted after the initial feature extractor and convolutional front-end, and before the Conformer blocks, replacing (or augmenting) fixed subsampling that is typically used to reduce frame rate prior to self-attention.
+
+Unless noted otherwise, all models share the same downstream Conformer architecture and differ only in their downsampling strategy. For LAPSE, we target two operating regimes:
+\begin{itemize}
+    \item \textbf{Phoneme-rate} encoding, with an average compression of approximately $10.4\times$ relative to the pre-LAPSE frame sequence length.
+    \item \textbf{Syllable-rate} encoding, with an average compression of approximately $28\times$.
+\end{itemize}
+
+\subsection{Optimization and training details}
+All models are trained for 70 epochs using the Adam optimizer ($\beta_1=0.9, \beta_2=0.98, \epsilon=10^{-9}$) with a Noam learning rate schedule (15k warmup steps). We use a global batch size of 256 and apply gradient clipping of 5.0. We find that tuning the rate-control weight $\lambda$ has negligible impact on the final compression rate, as the model consistently converges to the target count regardless of even huge variations in $\lambda$ (e.g. from 0.1 to 10). Decoding uses a beam size of 66 with a Transformer LM (weight 0.60) and CTC scoring (weight 0.40).
+
+We implement all models in SpeechBrain and train on NVIDIA GPUs. Unless otherwise stated, we use identical training and decoding hyperparameters across baselines to isolate the impact of downsampling.
+
+\subsection{Baselines}
+We compare LAPSE against the following downsampling approaches:
+\begin{enumerate}
+    \item \textbf{Convolutional subsampling} (fixed stride). Standard strided convolutional front-end that reduces the frame rate by a fixed factor (e.g., $2\times, 4\times$).
+    \item \textbf{Fixed-stride pooling/downsampling}. Uses the \emph{same attention pooling module} as LAPSE, but replaces learned boundary prediction with \emph{deterministic, evenly spaced boundaries} at a fixed stride to match LAPSE's average compression. This isolates the effect of \emph{learned boundaries} from the pooling mechanism itself.
+    \item \textbf{Token merging / similarity-based compression}. Learned merging approaches that compress by merging similar representations (applied at the same insertion point as LAPSE).
+    \item \textbf{Alignment-supervised boundaries (MFA)}. A boundary prediction variant trained with supervision from forced alignments produced by Montreal Forced Aligner, used to assess whether explicit boundary supervision improves or harms ASR relative to learned boundaries.
+\end{enumerate}
+
+Where applicable, we report two comparison modes:
+\begin{itemize}
+    \item \textbf{Matched compression}: compare methods at similar average output sequence length $M$.
+    \item \textbf{Matched accuracy}: compare methods at similar WER and report achieved compression.
+\end{itemize}
+
+\subsection{Evaluation metrics}
+\textbf{ASR quality.} We report word error rate (WER) on LibriSpeech test-clean and test-other.
+
+\textbf{Compression.} We report (i) the average compression factor $T/M$, where $T$ is the pre-downsampling length at the LAPSE input and $M$ is the number of segments emitted by LAPSE, and (ii) the tokens-per-second rate at the LAPSE output. For completeness, we also report the distribution (mean/median/percentiles) of $M$ across utterances, since quadratic attention cost is dominated by longer sequences.
+
+\textbf{Boundary alignment.} To assess whether LAPSE learns linguistically meaningful boundaries, we compare predicted boundaries against forced-alignment boundaries from MFA. We report boundary F1 (with 20ms tolerance) and provide qualitative visualizations overlaying predicted boundaries on spectrograms.
+
+\textbf{Efficiency.} When feasible, we measure encoder wall-clock time and/or compute proxies such as self-attention FLOPs proportional to $M^2$, to quantify the computational benefit of learned downsampling.
+
+\subsection{Implementation details and reproducibility}
+We release implementation details necessary to reproduce LAPSE, including boundary predictor dimensions, Gumbel temperature schedule, and the pooling mechanism. For all experiments we fix random seeds and report results from single runs.
 
 \subsubsection{Sections and Subsections}
 
