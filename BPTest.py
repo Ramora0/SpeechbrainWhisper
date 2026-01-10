@@ -389,18 +389,25 @@ class BoundaryPredictor2(nn.Module):
 
         # TESTING: Set ALL positions as boundaries (1x compression / no compression)
         # This tests if the problem is in boundary detection or downstream
-        hard_boundaries = torch.ones(batch_size, seq_len, device=hidden.device, dtype=hidden.dtype)
-        soft_boundaries = torch.ones(batch_size, seq_len, device=hidden.device, dtype=hidden.dtype)
-        hard_samples = torch.ones(batch_size, seq_len, device=hidden.device, dtype=hidden.dtype)
 
-        # Apply length masking (zero out padding positions)
+        # Apply length masking (zero out padding positions) - VECTORIZED VERSION
         actual_lens = (lengths * seq_len).long()
-        for i in range(batch_size):
-            valid_len = actual_lens[i].item()
-            if valid_len < seq_len:
-                hard_boundaries[i, valid_len:] = 0.0
-                soft_boundaries[i, valid_len:] = 0.0
-                hard_samples[i, valid_len:] = 0.0
+        # Create mask: (B, L) where True = valid position, False = padding
+        mask = (torch.arange(seq_len, device=hidden.device).unsqueeze(0) < actual_lens.unsqueeze(1)).to(dtype=hidden.dtype)
+        hard_boundaries = mask
+        soft_boundaries = mask
+        hard_samples = mask
+
+        # # SLOW PYTHON LOOP VERSION (commented out for performance)
+        # hard_boundaries = torch.ones(batch_size, seq_len, device=hidden.device, dtype=hidden.dtype)
+        # soft_boundaries = torch.ones(batch_size, seq_len, device=hidden.device, dtype=hidden.dtype)
+        # hard_samples = torch.ones(batch_size, seq_len, device=hidden.device, dtype=hidden.dtype)
+        # for i in range(batch_size):
+        #     valid_len = actual_lens[i].item()
+        #     if valid_len < seq_len:
+        #         hard_boundaries[i, valid_len:] = 0.0
+        #         soft_boundaries[i, valid_len:] = 0.0
+        #         hard_samples[i, valid_len:] = 0.0
         # ========================================================================
 
         # # Mask boundaries based on lengths
@@ -588,52 +595,55 @@ class BoundaryPredictor2(nn.Module):
         num_boundaries = num_boundaries_tensor.item()
         total_positions = total_positions_tensor.item()
 
+        # FAST VERSION: Skip expensive statistics computation
         boundary_cv = None
         boundary_adjacent_pct = None
 
-        with torch.no_grad():
-            all_spacings = []
-            adjacent_count = 0
-            total_boundaries = 0
+        # # SLOW PYTHON LOOP VERSION (commented out for performance)
+        # # This computes diagnostic statistics that aren't critical for training
+        # with torch.no_grad():
+        #     all_spacings = []
+        #     adjacent_count = 0
+        #     total_boundaries = 0
 
-            for b in range(batch_size):
-                # Get boundary positions for this sample
-                seq_len = hard_samples.shape[1]
-                # +1 because hard_samples is seq_len-1
-                actual_len = (lengths[b] * (seq_len + 1)).long().item()
-                valid_length = min(actual_len - 1, seq_len)
-                boundaries_b = hard_samples[b, :valid_length]
+        #     for b in range(batch_size):
+        #         # Get boundary positions for this sample
+        #         seq_len = hard_samples.shape[1]
+        #         # +1 because hard_samples is seq_len-1
+        #         actual_len = (lengths[b] * (seq_len + 1)).long().item()
+        #         valid_length = min(actual_len - 1, seq_len)
+        #         boundaries_b = hard_samples[b, :valid_length]
 
-                # Find positions where boundaries occur
-                boundary_positions = boundaries_b.nonzero(as_tuple=True)[0]
+        #         # Find positions where boundaries occur
+        #         boundary_positions = boundaries_b.nonzero(as_tuple=True)[0]
 
-                if len(boundary_positions) > 1:
-                    # Calculate spacings between consecutive boundaries
-                    spacings = boundary_positions[1:] - boundary_positions[:-1]
-                    all_spacings.extend(spacings.cpu().tolist())
+        #         if len(boundary_positions) > 1:
+        #             # Calculate spacings between consecutive boundaries
+        #             spacings = boundary_positions[1:] - boundary_positions[:-1]
+        #             all_spacings.extend(spacings.cpu().tolist())
 
-                    # Count adjacent boundaries (spacing == 1)
-                    adjacent_count += (spacings == 1).sum().item()
-                    # Number of gaps between boundaries
-                    total_boundaries += len(boundary_positions) - 1
+        #             # Count adjacent boundaries (spacing == 1)
+        #             adjacent_count += (spacings == 1).sum().item()
+        #             # Number of gaps between boundaries
+        #             total_boundaries += len(boundary_positions) - 1
 
-            # Calculate coefficient of variation (CV = std / mean)
-            if len(all_spacings) > 0:
-                spacings_tensor = torch.tensor(
-                    all_spacings, dtype=torch.float32)
-                mean_spacing = spacings_tensor.mean()
-                std_spacing = spacings_tensor.std()
-                if mean_spacing > 0:
-                    boundary_cv = (std_spacing / mean_spacing).item()
-                else:
-                    boundary_cv = 0.0
+        #     # Calculate coefficient of variation (CV = std / mean)
+        #     if len(all_spacings) > 0:
+        #         spacings_tensor = torch.tensor(
+        #             all_spacings, dtype=torch.float32)
+        #         mean_spacing = spacings_tensor.mean()
+        #         std_spacing = spacings_tensor.std()
+        #         if mean_spacing > 0:
+        #             boundary_cv = (std_spacing / mean_spacing).item()
+        #         else:
+        #             boundary_cv = 0.0
 
-            # Calculate adjacent percentage
-            if total_boundaries > 0:
-                boundary_adjacent_pct = (
-                    adjacent_count / total_boundaries) * 100.0
-            else:
-                boundary_adjacent_pct = 0.0
+        #     # Calculate adjacent percentage
+        #     if total_boundaries > 0:
+        #         boundary_adjacent_pct = (
+        #             adjacent_count / total_boundaries) * 100.0
+        #     else:
+        #         boundary_adjacent_pct = 0.0
 
         if flags.PRINT_FLOW:
             print(f"[BoundaryPredictor.py] RETURN:")
