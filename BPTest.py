@@ -1,28 +1,47 @@
 """
-BPTest.py - ULTRA-SIMPLIFIED VERSION FOR DEBUGGING
+BPTest.py - FULL END-TO-END BOUNDARYPREDICTOR
 
-This is a completely stripped-down version of BoundaryPredictor2 to isolate performance issues.
+Complete BoundaryPredictor implementation with both boundary learning and attention pooling.
 
-CHANGES FROM ORIGINAL:
-1. All multi-head attention pooling features COMMENTED OUT
-2. Complex attention pooling COMMENTED OUT (simple average pooling added but not used)
-3. ALL BOUNDARY DETECTION COMPLETELY BYPASSED
-4. ALL POOLING COMPLETELY BYPASSED
-5. Now acts as a pass-through: hidden states → (no compression) → same hidden states
+CURRENT CONFIGURATION - FULLY TRAINABLE:
 
-CURRENT BEHAVIOR:
-- Sets all boundaries to 1 (every position is a boundary)
-- Returns hidden states unchanged (pooled = hidden)
-- Returns input lengths unchanged (shortened_lengths = lengths)
-- Effectively 1x compression / NO compression at all
-- Still maintains length masking for padding positions
+1. BOUNDARY DETECTION: FULLY ENABLED AND TRAINABLE
+   - Learns to predict boundaries based on cosine similarity of adjacent frames
+   - Uses Q/K projections with MLP + residual connections
+   - RelaxedBernoulli sampling during training, thresholding during eval
+   - Temperature scheduling from 1.0 → 0.0 over training
+   - Proper length masking and safety checks (ensures ≥1 boundary per sequence)
+   - Trainable parameters:
+     * boundary_mlp (2-layer MLP with GELU)
+     * q_proj_layer, k_proj_layer (Q/K projection matrices)
+     * similarity_bias (learnable bias for boundary probability)
 
-PURPOSE:
-Test if the performance problem exists even with ZERO compression and ZERO pooling.
-- If this works: problem is in boundary detection or pooling
-- If this fails: problem is downstream (Transformer, loss, or something else)
+2. ATTENTION POOLING: FULLY ENABLED AND TRAINABLE
+   - Multi-head attention pooling with learned query vector
+   - Pools variable-length segments based on detected boundaries
+   - LayerNorm applied before key/value projections
+   - Trainable parameters:
+     * learned_query (attention query vector)
+     * pool_key, pool_value, pool_output (projection matrices)
+     * pool_layernorm (layer normalization)
+   - Identity initialization for stable learning
 
-This is the absolute minimal test case to narrow down the root cause.
+3. BOUNDARY LOSS: ENABLED
+   - Binomial loss based on phoneme count targets (from g2p_en)
+   - Encourages boundary count to match ground-truth phoneme count
+   - Weight: 10.0x (configurable via boundary_predictor_loss_weight)
+
+4. COMPRESSION: LEARNED AND VARIABLE
+   - Compression ratio learned dynamically based on input
+   - Target: ~5-10x compression (adjustable via prior parameter)
+   - Output lengths vary per sample based on predicted boundaries
+
+PROGRESSION:
+✓ Stage 1: Frozen pooling, fixed boundaries=1s → Baseline (no-op)
+✓ Stage 2: Trainable pooling, fixed boundaries=1s → Test pooling learning
+✓ Stage 3: Trainable pooling, learned boundaries → FULL SYSTEM (current)
+
+This is the complete BoundaryPredictor ready for end-to-end training!
 """
 
 import torch
@@ -52,7 +71,7 @@ class BoundaryPredictor2(nn.Module):
         self.q_proj_layer = nn.Linear(input_dim, input_dim, bias=False)
         self.k_proj_layer = nn.Linear(input_dim, input_dim, bias=False)
 
-        self.similarity_bias = nn.Parameter(torch.tensor(0.098))
+        self.similarity_bias = nn.Parameter(torch.tensor(-1.0))
 
         with torch.no_grad():
             self.q_proj_layer.weight.copy_(torch.eye(input_dim))
@@ -68,8 +87,9 @@ class BoundaryPredictor2(nn.Module):
         self.head_dim = input_dim // self.num_heads
         assert input_dim % self.num_heads == 0, f"input_dim ({input_dim}) must be divisible by num_heads ({self.num_heads})"
 
-        # Learned query vector (shared across all segments) - initialized to zeros for identity-like behavior
-        self.learned_query = nn.Parameter(torch.zeros(input_dim), requires_grad=False)
+        # Learned query vector (shared across all segments)
+        # Initialize to small random values to break symmetry
+        self.learned_query = nn.Parameter(torch.randn(input_dim) * 0.02)
 
         # Key and Value projections
         self.pool_key = nn.Linear(input_dim, input_dim, bias=False)
@@ -84,25 +104,21 @@ class BoundaryPredictor2(nn.Module):
         # Scaling factor for attention scores (per head)
         self.pool_scale = self.head_dim ** -0.5
 
-        # Initialize projections as identity matrices
+        # Initialize projections as identity matrices (good starting point for learning)
         with torch.no_grad():
             self.pool_key.weight.copy_(torch.eye(input_dim))
             self.pool_value.weight.copy_(torch.eye(input_dim))
             self.pool_output.weight.copy_(torch.eye(input_dim))
 
-        # Disable learning for all attention pooling parameters
-        self.pool_key.weight.requires_grad = False
-        self.pool_value.weight.requires_grad = False
-        self.pool_output.weight.requires_grad = False
-
-        # Mark as non-reinitializable
+        # Mark as non-reinitializable (so checkpoint loading doesn't reset them)
         self.pool_key.weight._no_reinit = True
         self.pool_value.weight._no_reinit = True
         self.pool_output.weight._no_reinit = True
 
-        # Disable learning for LayerNorm parameters
-        for param in self.pool_layernorm.parameters():
-            param.requires_grad = False
+        # All attention pooling parameters are now TRAINABLE (requires_grad=True by default):
+        # - learned_query: Attention query vector
+        # - pool_key.weight, pool_value.weight, pool_output.weight: Projection matrices
+        # - pool_layernorm.weight, pool_layernorm.bias: Layer normalization parameters
 
     def set_prior(self, prior):
         self.prior = prior
@@ -197,10 +213,8 @@ class BoundaryPredictor2(nn.Module):
                                self.head_dim).transpose(1, 2)
 
         # Step 5: Apply LayerNorm before projecting to keys and values
-        # DISABLED FOR IDENTITY BEHAVIOR: LayerNorm normalizes to mean=0, std=1
-        # which changes values significantly, even with frozen params
-        # hidden_normed = self.pool_layernorm(hidden)  # (B, L, D)
-        hidden_normed = hidden  # Bypass LayerNorm for true identity behavior
+        # LayerNorm stabilizes attention by normalizing to mean=0, std=1
+        hidden_normed = self.pool_layernorm(hidden)  # (B, L, D)
 
         # Step 6: Project to keys and values and reshape for multi-head
         keys = self.pool_key(hidden_normed)      # (B, L, D)
@@ -277,7 +291,8 @@ class BoundaryPredictor2(nn.Module):
 
         if foo is None:
             if flags.PRINT_FLOW:
-                print(f"[BoundaryPredictor.py] No boundaries found, returning empty tensor")
+                print(
+                    f"[BoundaryPredictor.py] No boundaries found, returning empty tensor")
             return torch.empty(batch_size, 0, hidden_dim, device=device, dtype=dtype)
 
         max_segments = foo.size(2)  # S
@@ -309,8 +324,10 @@ class BoundaryPredictor2(nn.Module):
         pooled = masked_hidden.sum(dim=1)
 
         # Normalize by segment lengths (count of positions in each segment)
-        segment_counts = segment_mask.sum(dim=1, keepdim=True).transpose(1, 2)  # (B, 1, S) -> (B, S, 1)
-        segment_counts = torch.clamp(segment_counts, min=1.0)  # Avoid division by zero
+        segment_counts = segment_mask.sum(dim=1, keepdim=True).transpose(
+            1, 2)  # (B, 1, S) -> (B, S, 1)
+        segment_counts = torch.clamp(
+            segment_counts, min=1.0)  # Avoid division by zero
 
         pooled = pooled / segment_counts  # (B, S, D)
 
@@ -340,116 +357,102 @@ class BoundaryPredictor2(nn.Module):
             print(f"  lengths.shape = {lengths.shape}")
             print(f"  lengths = {lengths}")
 
-        # ========== BOUNDARY DETECTION COMPLETELY BYPASSED FOR TESTING ==========
-        # # q_input = F.normalize(self.dropout(hidden[:, :-1]), dim=-1, eps=1e-8)
-        # # q_mlp_out = self.boundary_mlp(q_input)
-        # # q_residual = q_mlp_out + q_input  # Residual connection
-        # # q_hidden = self.q_proj_layer(F.normalize(q_residual, dim=-1, eps=1e-8))
+        # ========== BOUNDARY DETECTION ENABLED ==========
+        # Compute Q and K from adjacent frames
+        q_input = F.normalize(self.dropout(hidden[:, :-1]), dim=-1, eps=1e-8)
+        q_mlp_out = self.boundary_mlp(q_input)
+        q_residual = q_mlp_out + q_input  # Residual connection
+        q_hidden = self.q_proj_layer(F.normalize(q_residual, dim=-1, eps=1e-8))
 
-        # # k_input = F.normalize(self.dropout(hidden[:, 1:]), dim=-1, eps=1e-8)
-        # # k_mlp_out = self.boundary_mlp(k_input)
-        # # k_residual = k_mlp_out + k_input  # Residual connection
-        # # k_hidden = self.k_proj_layer(F.normalize(k_residual, dim=-1, eps=1e-8))
+        k_input = F.normalize(self.dropout(hidden[:, 1:]), dim=-1, eps=1e-8)
+        k_mlp_out = self.boundary_mlp(k_input)
+        k_residual = k_mlp_out + k_input  # Residual connection
+        k_hidden = self.k_proj_layer(F.normalize(k_residual, dim=-1, eps=1e-8))
 
-        # # cos_sim = torch.einsum("bld,bld->bl", q_hidden, k_hidden)
+        # Compute cosine similarity between adjacent frames
+        cos_sim = torch.einsum("bld,bld->bl", q_hidden, k_hidden)
 
-        # # # Debug: Check for NaN values
-        # # if torch.isnan(cos_sim).any():
-        # #     if flags.PRINT_NAN_INF:
-        # #         print(f"[BoundaryPredictor.py] WARNING: NaN detected in cos_sim")
-        # #         print(f"  q_hidden has NaN: {torch.isnan(q_hidden).any()}")
-        # #         print(f"  k_hidden has NaN: {torch.isnan(k_hidden).any()}")
-        # #         print(f"  q_residual has NaN: {torch.isnan(q_residual).any()}")
-        # #         print(f"  k_residual has NaN: {torch.isnan(k_residual).any()}")
+        # Debug: Check for NaN values
+        if torch.isnan(cos_sim).any():
+            if flags.PRINT_NAN_INF:
+                print(f"[BoundaryPredictor.py] WARNING: NaN detected in cos_sim")
+                print(f"  q_hidden has NaN: {torch.isnan(q_hidden).any()}")
+                print(f"  k_hidden has NaN: {torch.isnan(k_hidden).any()}")
+                print(f"  q_residual has NaN: {torch.isnan(q_residual).any()}")
+                print(f"  k_residual has NaN: {torch.isnan(k_residual).any()}")
 
-        # # probs = torch.clamp(
-        # #     (1 - (cos_sim + self.similarity_bias)) * 0.5, min=0.0, max=1.0)
-        # # # probs = torch.ones_like(cos_sim) * 0.5
-        # # probs = F.pad(probs, (0, 1), value=0.0)
+        # Convert similarity to boundary probability
+        probs = torch.clamp(
+            (1 - (cos_sim + self.similarity_bias)) * 0.5, min=0.0, max=1.0)
+        probs = F.pad(probs, (0, 1), value=0.0)
 
-        # # # Debug: Check for NaN in probs
-        # # if torch.isnan(probs).any():
-        # #     if flags.PRINT_NAN_INF:
-        # #         print(f"[BoundaryPredictor.py] ERROR: NaN detected in probs!")
-        # #         print(f"  probs shape: {probs.shape}")
-        # #         print(f"  Number of NaN values: {torch.isnan(probs).sum()}")
-        # #         print(f"  cos_sim min/max: {cos_sim.min()}/{cos_sim.max()}")
-        # #         print(f"  similarity_bias: {self.similarity_bias.item()}")
-        # # if self.training:
-        # #     bernoulli = torch.distributions.relaxed_bernoulli.RelaxedBernoulli(
-        # #         temperature=self.temp,
-        # #         probs=probs,
-        # #     )
-        # #     soft_boundaries = bernoulli.rsample()
-        # #     hard_samples = (soft_boundaries > 0.5).float()
-        # # else:
-        # #     # During evaluation, threshold probabilities directly without sampling
-        # #     soft_boundaries = probs
-        # #     hard_samples = (probs > 0.5).float()
+        # Debug: Check for NaN in probs
+        if torch.isnan(probs).any():
+            if flags.PRINT_NAN_INF:
+                print(f"[BoundaryPredictor.py] ERROR: NaN detected in probs!")
+                print(f"  probs shape: {probs.shape}")
+                print(f"  Number of NaN values: {torch.isnan(probs).sum()}")
+                print(f"  cos_sim min/max: {cos_sim.min()}/{cos_sim.max()}")
+                print(f"  similarity_bias: {self.similarity_bias.item()}")
 
-        # TESTING: Set ALL positions as boundaries (1x compression / no compression)
-        # This tests if the problem is in boundary detection or downstream
+        # Sample boundaries
+        if self.training:
+            bernoulli = torch.distributions.relaxed_bernoulli.RelaxedBernoulli(
+                temperature=self.temp,
+                probs=probs,
+            )
+            soft_boundaries = bernoulli.rsample()
+            hard_samples = (soft_boundaries > 0.5).float()
+        else:
+            # During evaluation, threshold probabilities directly without sampling
+            soft_boundaries = probs
+            hard_samples = (probs > 0.5).float()
 
-        # Apply length masking (zero out padding positions) - VECTORIZED VERSION
-        actual_lens = (lengths * seq_len).long()
-        # Create mask: (B, L) where True = valid position, False = padding
-        mask = (torch.arange(seq_len, device=hidden.device).unsqueeze(0) < actual_lens.unsqueeze(1)).to(dtype=hidden.dtype)
-        hard_boundaries = mask
-        soft_boundaries = mask
-        hard_samples = mask
+        # Mask boundaries based on lengths
+        batch_size, boundary_seq_len = soft_boundaries.shape
+        # +1 because boundaries are seq_len-1
+        actual_lens = (lengths * (boundary_seq_len + 1)).long()
+        # Debug: Print target compression ratio
+        target_compression = actual_lens.float() / target_boundary_counts.to(device=actual_lens.device, dtype=torch.float32).clamp(min=1.0)
+        print(
+            f"  target_compression (actual_lens / target_boundary_counts) = {target_compression}")
 
-        # # SLOW PYTHON LOOP VERSION (commented out for performance)
-        # hard_boundaries = torch.ones(batch_size, seq_len, device=hidden.device, dtype=hidden.dtype)
-        # soft_boundaries = torch.ones(batch_size, seq_len, device=hidden.device, dtype=hidden.dtype)
-        # hard_samples = torch.ones(batch_size, seq_len, device=hidden.device, dtype=hidden.dtype)
-        # for i in range(batch_size):
-        #     valid_len = actual_lens[i].item()
-        #     if valid_len < seq_len:
-        #         hard_boundaries[i, valid_len:] = 0.0
-        #         soft_boundaries[i, valid_len:] = 0.0
-        #         hard_samples[i, valid_len:] = 0.0
-        # ========================================================================
+        # Create mask and apply
+        for i in range(batch_size):
+            valid_len = min(actual_lens[i].item() - 1, boundary_seq_len)
+            if valid_len < boundary_seq_len:
+                # Zero out padding positions
+                soft_boundaries[i, valid_len:] = 0.0
+                hard_samples[i, valid_len:] = 0.0
+                # Set first padding position as boundary
+                if valid_len >= 0 and valid_len < boundary_seq_len:
+                    soft_boundaries[i, valid_len] = 1.0
+                    hard_samples[i, valid_len] = 1.0
 
-        # # Mask boundaries based on lengths
-        # batch_size, boundary_seq_len = soft_boundaries.shape
-        # # +1 because boundaries are seq_len-1
-        # actual_lens = (lengths * (boundary_seq_len + 1)).long()
+        # Straight-through estimator: hard values for forward, soft gradients for backward
+        hard_boundaries = (
+            hard_samples - soft_boundaries.detach() + soft_boundaries
+        )
 
-        # # Create mask and apply
-        # for i in range(batch_size):
-        #     valid_len = min(actual_lens[i].item() - 1, boundary_seq_len)
-        #     if valid_len < boundary_seq_len:
-        #         # Zero out padding positions
-        #         soft_boundaries[i, valid_len:] = 0.0
-        #         hard_samples[i, valid_len:] = 0.0
-        #         # Set first padding position as boundary
-        #         if valid_len >= 0 and valid_len < boundary_seq_len:
-        #             soft_boundaries[i, valid_len] = 1.0
-        #             hard_samples[i, valid_len] = 1.0
+        # Ensure each sequence has at least one boundary to prevent empty segments
+        # This is a safeguard that should rarely trigger
+        boundary_seq_len = hard_boundaries.shape[1]
+        sequences_with_no_boundaries = []
+        for i in range(batch_size):
+            # Check if this sequence has any boundaries
+            if hard_boundaries[i].sum() == 0:
+                sequences_with_no_boundaries.append(i)
+                # Add boundary at the last valid position (ensure within bounds)
+                valid_len = min(actual_lens[i].item() - 1, boundary_seq_len)
+                boundary_idx = min(valid_len, boundary_seq_len - 1)
+                if boundary_idx >= 0:
+                    hard_boundaries[i, boundary_idx] = 1.0
 
-        # hard_boundaries = (
-        #     hard_samples - soft_boundaries.detach() + soft_boundaries
-        # )
-
-        # # Ensure each sequence has at least one boundary to prevent empty segments
-        # # This is a safeguard that should rarely trigger
-        # boundary_seq_len = hard_boundaries.shape[1]
-        # sequences_with_no_boundaries = []
-        # for i in range(batch_size):
-        #     # Check if this sequence has any boundaries
-        #     if hard_boundaries[i].sum() == 0:
-        #         sequences_with_no_boundaries.append(i)
-        #         # Add boundary at the last valid position (ensure within bounds)
-        #         valid_len = min(actual_lens[i].item() - 1, boundary_seq_len)
-        #         boundary_idx = min(valid_len, boundary_seq_len - 1)
-        #         if boundary_idx >= 0:
-        #             hard_boundaries[i, boundary_idx] = 1.0
-
-        # # Print warning if this happens during training (should be rare)
-        # if len(sequences_with_no_boundaries) > 0 and self.training:
-        #     print(
-        #         f"[BoundaryPredictor.py] WARNING: Added emergency boundary for {len(sequences_with_no_boundaries)} sequence(s) with no boundaries during TRAINING")
-        #     print(f"  Affected sequences: {sequences_with_no_boundaries}")
+        # Print warning if this happens during training (should be rare)
+        if len(sequences_with_no_boundaries) > 0 and self.training:
+            print(
+                f"[BoundaryPredictor.py] WARNING: Added emergency boundary for {len(sequences_with_no_boundaries)} sequence(s) with no boundaries during TRAINING")
+            print(f"  Affected sequences: {sequences_with_no_boundaries}")
 
         if flags.PRINT_FLOW:
             print(f"[BoundaryPredictor.py] BEFORE pooling:")
@@ -514,20 +517,27 @@ class BoundaryPredictor2(nn.Module):
         if flags.PRINT_DATA:
             print(f"  max_segments (from pooled) = {max_segments}")
 
-        shortened_lengths = torch.zeros(batch_size, device=hidden.device)
-        for b in range(batch_size):
-            # Count boundaries within valid length
-            valid_len = actual_lens[b].item()
-            num_boundaries = hard_boundaries[b, :valid_len].sum().item()
-            # With all 1s boundaries, num_boundaries should equal valid_len
-            # Each position becomes its own segment
-            if num_boundaries > 0 and max_segments > 0:
-                # The number of segments equals the number of boundaries (since all positions are boundaries)
-                num_segments = min(int(num_boundaries), max_segments)
-                # Compute relative length
-                shortened_lengths[b] = num_segments / max_segments
-            else:
-                shortened_lengths[b] = 0.0
+        # Vectorized calculation of shortened_lengths
+        # Create mask for valid positions within each sequence
+        boundary_seq_len = hard_boundaries.shape[1]
+        valid_lens = actual_lens.clamp(max=boundary_seq_len)
+        mask = torch.arange(boundary_seq_len, device=hard_boundaries.device).unsqueeze(
+            0) < valid_lens.unsqueeze(1)
+
+        # Count boundaries within valid length for each sample
+        num_boundaries_per_sample = (hard_boundaries * mask).sum(dim=1)
+
+        # IMPORTANT: Number of segments = number of boundaries + 1
+        # This is because segment_ids = cumsum(boundaries) - boundaries creates:
+        # - Segment 0 before any boundaries
+        # - One segment per boundary marker
+        # Example: 2 boundaries -> 3 segments (segment 0, 1, 2)
+        num_segments_per_sample = num_boundaries_per_sample + 1
+
+        # Clamp to max_segments and compute relative lengths
+        num_segments_per_sample = num_segments_per_sample.clamp(
+            max=max_segments)
+        shortened_lengths = num_segments_per_sample.float() / max(max_segments, 1)
 
         if flags.PRINT_DATA:
             print(
@@ -579,71 +589,75 @@ class BoundaryPredictor2(nn.Module):
         actual_lens = (lengths * seq_len).long()
         total_positions_tensor = actual_lens.sum().float()
 
-        # ========== DISABLE BINOMIAL LOSS FOR TESTING ==========
-        # Don't compute boundary loss at all - just return zeros
+        # Compute boundary loss
         if self.training:
+            per_sample_loss = 10. * self.calc_loss_target_counts(
+                hard_boundaries,
+                soft_boundaries,
+                lengths,
+                target_boundary_counts,
+                reduce=False,
+            )
+
             if return_unreduced_boundary_loss:
-                loss = torch.zeros(batch_size, device=hidden.device, requires_grad=False)
+                loss = per_sample_loss
             else:
-                loss = torch.tensor(0.0, device=hidden.device, requires_grad=False)
+                loss = per_sample_loss.mean()
         else:
             loss = torch.tensor(0.0, device=hidden.device)
             if return_unreduced_boundary_loss:
                 loss = loss.repeat(batch_size)
-        # ========================================================
 
         num_boundaries = num_boundaries_tensor.item()
         total_positions = total_positions_tensor.item()
 
-        # FAST VERSION: Skip expensive statistics computation
+        # Compute diagnostic statistics for boundary spacing
         boundary_cv = None
         boundary_adjacent_pct = None
 
-        # # SLOW PYTHON LOOP VERSION (commented out for performance)
-        # # This computes diagnostic statistics that aren't critical for training
-        # with torch.no_grad():
-        #     all_spacings = []
-        #     adjacent_count = 0
-        #     total_boundaries = 0
+        with torch.no_grad():
+            all_spacings = []
+            adjacent_count = 0
+            total_boundaries = 0
 
-        #     for b in range(batch_size):
-        #         # Get boundary positions for this sample
-        #         seq_len = hard_samples.shape[1]
-        #         # +1 because hard_samples is seq_len-1
-        #         actual_len = (lengths[b] * (seq_len + 1)).long().item()
-        #         valid_length = min(actual_len - 1, seq_len)
-        #         boundaries_b = hard_samples[b, :valid_length]
+            for b in range(batch_size):
+                # Get boundary positions for this sample
+                seq_len = hard_samples.shape[1]
+                # +1 because hard_samples is seq_len-1
+                actual_len = (lengths[b] * (seq_len + 1)).long().item()
+                valid_length = min(actual_len - 1, seq_len)
+                boundaries_b = hard_samples[b, :valid_length]
 
-        #         # Find positions where boundaries occur
-        #         boundary_positions = boundaries_b.nonzero(as_tuple=True)[0]
+                # Find positions where boundaries occur
+                boundary_positions = boundaries_b.nonzero(as_tuple=True)[0]
 
-        #         if len(boundary_positions) > 1:
-        #             # Calculate spacings between consecutive boundaries
-        #             spacings = boundary_positions[1:] - boundary_positions[:-1]
-        #             all_spacings.extend(spacings.cpu().tolist())
+                if len(boundary_positions) > 1:
+                    # Calculate spacings between consecutive boundaries
+                    spacings = boundary_positions[1:] - boundary_positions[:-1]
+                    all_spacings.extend(spacings.cpu().tolist())
 
-        #             # Count adjacent boundaries (spacing == 1)
-        #             adjacent_count += (spacings == 1).sum().item()
-        #             # Number of gaps between boundaries
-        #             total_boundaries += len(boundary_positions) - 1
+                    # Count adjacent boundaries (spacing == 1)
+                    adjacent_count += (spacings == 1).sum().item()
+                    # Number of gaps between boundaries
+                    total_boundaries += len(boundary_positions) - 1
 
-        #     # Calculate coefficient of variation (CV = std / mean)
-        #     if len(all_spacings) > 0:
-        #         spacings_tensor = torch.tensor(
-        #             all_spacings, dtype=torch.float32)
-        #         mean_spacing = spacings_tensor.mean()
-        #         std_spacing = spacings_tensor.std()
-        #         if mean_spacing > 0:
-        #             boundary_cv = (std_spacing / mean_spacing).item()
-        #         else:
-        #             boundary_cv = 0.0
+            # Calculate coefficient of variation (CV = std / mean)
+            if len(all_spacings) > 0:
+                spacings_tensor = torch.tensor(
+                    all_spacings, dtype=torch.float32)
+                mean_spacing = spacings_tensor.mean()
+                std_spacing = spacings_tensor.std()
+                if mean_spacing > 0:
+                    boundary_cv = (std_spacing / mean_spacing).item()
+                else:
+                    boundary_cv = 0.0
 
-        #     # Calculate adjacent percentage
-        #     if total_boundaries > 0:
-        #         boundary_adjacent_pct = (
-        #             adjacent_count / total_boundaries) * 100.0
-        #     else:
-        #         boundary_adjacent_pct = 0.0
+            # Calculate adjacent percentage
+            if total_boundaries > 0:
+                boundary_adjacent_pct = (
+                    adjacent_count / total_boundaries) * 100.0
+            else:
+                boundary_adjacent_pct = 0.0
 
         if flags.PRINT_FLOW:
             print(f"[BoundaryPredictor.py] RETURN:")
