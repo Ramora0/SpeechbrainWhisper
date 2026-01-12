@@ -7,7 +7,7 @@ PRINT_FLOW = False
 PRINT_DATA = False
 
 # Flag for Boundary Predictor loss logic checks (e.g. boundaries > totals)
-PRINT_BP_LOSS_CHECKS = True
+PRINT_BP_LOSS_CHECKS = False
 
 # Flag for NaN/Inf checks
-PRINT_NAN_INF = True
+PRINT_NAN_INF = False
