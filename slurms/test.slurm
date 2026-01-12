@@ -1,5 +1,6 @@
 #!/bin/bash
 #SBATCH --job-name=test
+#SBATCH --account=PAS2836
 #SBATCH --output=slurms/test_%j.out
 #SBATCH --error=slurms/test_%j.err
 #SBATCH --nodes=1
