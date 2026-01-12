@@ -1,47 +1,46 @@
 """
-BPTest.py - FULL END-TO-END BOUNDARYPREDICTOR
+BPTest3.py - STAGE 0: COMPLETE IDENTITY (NO-OP)
 
-Complete BoundaryPredictor implementation with both boundary learning and attention pooling.
+Complete identity transformation with both boundaries and attention pooling frozen.
 
-CURRENT CONFIGURATION - FULLY TRAINABLE:
+CURRENT CONFIGURATION - STAGE 0 (BASELINE):
 
-1. BOUNDARY DETECTION: FULLY ENABLED AND TRAINABLE
-   - Learns to predict boundaries based on cosine similarity of adjacent frames
-   - Uses Q/K projections with MLP + residual connections
-   - RelaxedBernoulli sampling during training, thresholding during eval
-   - Temperature scheduling from 1.0 → 0.0 over training
-   - Proper length masking and safety checks (ensures ≥1 boundary per sequence)
-   - Trainable parameters:
-     * boundary_mlp (2-layer MLP with GELU)
-     * q_proj_layer, k_proj_layer (Q/K projection matrices)
-     * similarity_bias (learnable bias for boundary probability)
+1. BOUNDARY DETECTION: COMPLETELY BYPASSED
+   - No boundary computation at all
+   - Forward pass skips all boundary detection logic
+   - All boundary detection parameters exist but are completely unused
+   - No gradient flow through boundary detection modules
 
-2. ATTENTION POOLING: FULLY ENABLED AND TRAINABLE
-   - Multi-head attention pooling with learned query vector
-   - Pools variable-length segments based on detected boundaries
-   - LayerNorm applied before key/value projections
-   - Trainable parameters:
-     * learned_query (attention query vector)
-     * pool_key, pool_value, pool_output (projection matrices)
-     * pool_layernorm (layer normalization)
-   - Identity initialization for stable learning
+2. ATTENTION POOLING: COMPLETELY BYPASSED
+   - No pooling computation at all
+   - Input hidden states pass through unchanged
+   - All attention pooling parameters exist but are completely unused
+   - No gradient flow through attention pooling modules
 
-3. BOUNDARY LOSS: ENABLED
-   - Binomial loss based on phoneme count targets (from g2p_en)
-   - Encourages boundary count to match ground-truth phoneme count
-   - Weight: 10.0x (configurable via boundary_predictor_loss_weight)
+3. BOUNDARY LOSS: DISABLED
+   - Loss always returns 0.0
+   - No gradient signal for boundary prediction
 
-4. COMPRESSION: LEARNED AND VARIABLE
-   - Compression ratio learned dynamically based on input
-   - Target: ~5-10x compression (adjustable via prior parameter)
-   - Output lengths vary per sample based on predicted boundaries
+4. COMPRESSION: NONE (TRUE IDENTITY)
+   - Output = Input (exact copy)
+   - Output length = Input length (no compression)
+   - shortened_lengths = input lengths (1:1 mapping)
+   - Proper padding masking maintained
+
+PURPOSE:
+Establish a true no-op baseline where the BoundaryPredictor module has ZERO effect
+on the forward pass. This serves as:
+- Sanity check that the rest of the pipeline works
+- Baseline performance metric (no boundary prediction overhead)
+- Starting point for gradual feature enabling
 
 PROGRESSION:
-✓ Stage 1: Frozen pooling, fixed boundaries=1s → Baseline (no-op)
-✓ Stage 2: Trainable pooling, fixed boundaries=1s → Test pooling learning
-✓ Stage 3: Trainable pooling, learned boundaries → FULL SYSTEM (current)
+✓ Stage 0: COMPLETE IDENTITY (no boundaries, no pooling) → TRUE NO-OP (current)
+- Stage 1: Fixed boundaries=1s, frozen pooling → Test segmentation
+- Stage 2: Fixed boundaries=1s, trainable pooling → Test pooling learning
+- Stage 3: Learned boundaries, trainable pooling → Full system (see BPTest.py)
 
-This is the complete BoundaryPredictor ready for end-to-end training!
+Use this to verify the pipeline works correctly before enabling any BoundaryPredictor features!
 """
 
 import torch
@@ -115,10 +114,10 @@ class BoundaryPredictor2(nn.Module):
         self.pool_value.weight._no_reinit = True
         self.pool_output.weight._no_reinit = True
 
-        # All attention pooling parameters are now TRAINABLE (requires_grad=True by default):
-        # - learned_query: Attention query vector
-        # - pool_key.weight, pool_value.weight, pool_output.weight: Projection matrices
-        # - pool_layernorm.weight, pool_layernorm.bias: Layer normalization parameters
+        # NOTE: All parameters exist for compatibility but are COMPLETELY UNUSED in forward pass
+        # - No boundary detection computation
+        # - No attention pooling computation
+        # - Forward pass is pure identity: output = input
 
     def set_prior(self, prior):
         self.prior = prior
@@ -348,291 +347,52 @@ class BoundaryPredictor2(nn.Module):
         target_boundary_counts=None,
         return_unreduced_boundary_loss=False,
     ):
+        """
+        COMPLETE IDENTITY FORWARD PASS - NO COMPUTATION
+
+        This forward method bypasses ALL boundary detection and attention pooling.
+        Output = Input (exact copy with no transformation).
+
+        This serves as a true no-op baseline to verify the rest of the pipeline works.
+        """
         batch_size, seq_len, _ = hidden.shape
 
         if flags.PRINT_FLOW:
-            print(f"[BoundaryPredictor.py] forward() INPUT:")
+            print(f"[BoundaryPredictor.py] forward() INPUT (IDENTITY MODE):")
         if flags.PRINT_DATA:
             print(f"  hidden.shape = {hidden.shape}")
             print(f"  lengths.shape = {lengths.shape}")
             print(f"  lengths = {lengths}")
 
-        # ========== BOUNDARY DETECTION ENABLED ==========
-        # Compute Q and K from adjacent frames
-        q_input = F.normalize(self.dropout(hidden[:, :-1]), dim=-1, eps=1e-8)
-        q_mlp_out = self.boundary_mlp(q_input)
-        q_residual = q_mlp_out + q_input  # Residual connection
-        q_hidden = self.q_proj_layer(F.normalize(q_residual, dim=-1, eps=1e-8))
+        # ========== COMPLETE IDENTITY: NO BOUNDARY DETECTION, NO POOLING ==========
+        # Skip all boundary computation and pooling
+        # Output is exactly the input hidden states
 
-        k_input = F.normalize(self.dropout(hidden[:, 1:]), dim=-1, eps=1e-8)
-        k_mlp_out = self.boundary_mlp(k_input)
-        k_residual = k_mlp_out + k_input  # Residual connection
-        k_hidden = self.k_proj_layer(F.normalize(k_residual, dim=-1, eps=1e-8))
+        pooled = hidden  # Identity: output = input
 
-        # Compute cosine similarity between adjacent frames
-        cos_sim = torch.einsum("bld,bld->bl", q_hidden, k_hidden)
+        # Since output = input, shortened_lengths = input lengths (no compression)
+        shortened_lengths = lengths  # Identity: output length = input length
 
-        # Debug: Check for NaN values
-        if torch.isnan(cos_sim).any():
-            if flags.PRINT_NAN_INF:
-                print(f"[BoundaryPredictor.py] WARNING: NaN detected in cos_sim")
-                print(f"  q_hidden has NaN: {torch.isnan(q_hidden).any()}")
-                print(f"  k_hidden has NaN: {torch.isnan(k_hidden).any()}")
-                print(f"  q_residual has NaN: {torch.isnan(q_residual).any()}")
-                print(f"  k_residual has NaN: {torch.isnan(k_residual).any()}")
-
-        # Convert similarity to boundary probability
-        probs = torch.clamp(
-            (1 - (cos_sim + self.similarity_bias)) * 0.5, min=0.0, max=1.0)
-        probs = F.pad(probs, (0, 1), value=0.0)
-
-        # Debug: Check for NaN in probs
-        if torch.isnan(probs).any():
-            if flags.PRINT_NAN_INF:
-                print(f"[BoundaryPredictor.py] ERROR: NaN detected in probs!")
-                print(f"  probs shape: {probs.shape}")
-                print(f"  Number of NaN values: {torch.isnan(probs).sum()}")
-                print(f"  cos_sim min/max: {cos_sim.min()}/{cos_sim.max()}")
-                print(f"  similarity_bias: {self.similarity_bias.item()}")
-
-        # Sample boundaries
-        if self.training:
-            bernoulli = torch.distributions.relaxed_bernoulli.RelaxedBernoulli(
-                temperature=self.temp,
-                probs=probs,
-            )
-            soft_boundaries = bernoulli.rsample()
-            hard_samples = (soft_boundaries > 0.5).float()
-        else:
-            # During evaluation, threshold probabilities directly without sampling
-            soft_boundaries = probs
-            hard_samples = (probs > 0.5).float()
-
-        # Mask boundaries based on lengths (vectorized)
-        batch_size, boundary_seq_len = soft_boundaries.shape
-        # +1 because boundaries are seq_len-1
-        actual_lens = (lengths * (boundary_seq_len + 1)).long()
-
-        # Compute valid lengths for each sample
-        valid_lens = torch.clamp(actual_lens - 1, min=0, max=boundary_seq_len)
-
-        # Create position indices: [batch_size, boundary_seq_len]
-        position_indices = torch.arange(
-            boundary_seq_len, device=soft_boundaries.device).unsqueeze(0).expand(batch_size, -1)
-
-        # Create masks for valid and boundary positions
-        valid_mask = position_indices < valid_lens.unsqueeze(
-            1)  # [batch_size, boundary_seq_len]
-        needs_padding = valid_lens < boundary_seq_len
-        boundary_position_mask = (
-            position_indices == valid_lens.unsqueeze(1)) & needs_padding.unsqueeze(1)
-
-        # Zero out padding positions and set boundary positions
-        soft_boundaries = soft_boundaries * \
-            valid_mask.float() + boundary_position_mask.float()
-        hard_samples = hard_samples * valid_mask.float() + boundary_position_mask.float()
-
-        # Straight-through estimator: hard values for forward, soft gradients for backward
-        hard_boundaries = (
-            hard_samples - soft_boundaries.detach() + soft_boundaries
-        )
-
-        # Ensure each sequence has at least one boundary to prevent empty segments (vectorized)
-        # This is a safeguard that should rarely trigger
-        boundary_seq_len = hard_boundaries.shape[1]
-
-        # Find sequences with no boundaries
-        has_no_boundaries = hard_boundaries.sum(dim=1) == 0  # [batch_size]
-
-        if has_no_boundaries.any():
-            # Compute boundary indices for sequences that need them
-            valid_lens_for_boundary = torch.clamp(
-                actual_lens - 1, min=0, max=boundary_seq_len - 1)
-
-            # Create a one-hot tensor for the boundary positions
-            boundary_indices = valid_lens_for_boundary[has_no_boundaries]
-            batch_indices = torch.arange(batch_size, device=hard_boundaries.device)[
-                has_no_boundaries]
-
-            # Set boundaries at the computed positions
-            hard_boundaries[batch_indices, boundary_indices] = 1.0
-
-            # Print warning if this happens during training (should be rare)
-            if self.training:
-                num_affected = has_no_boundaries.sum().item()
-                sequences_with_no_boundaries = batch_indices.cpu().tolist()
-                print(
-                    f"[BoundaryPredictor.py] WARNING: Added emergency boundary for {num_affected} sequence(s) with no boundaries during TRAINING")
-                print(f"  Affected sequences: {sequences_with_no_boundaries}")
-
-        if flags.PRINT_FLOW:
-            print(f"[BoundaryPredictor.py] BEFORE pooling:")
-        if flags.PRINT_DATA:
-            print(f"  hard_boundaries.shape = {hard_boundaries.shape}")
-            print(
-                f"  hard_boundaries sum per sample = {hard_boundaries.sum(dim=1)}")
-
-        # Apply attention pooling
-        pooled = self._attention_pooling(
-            hard_boundaries, hidden, lengths)
-
-        if flags.PRINT_FLOW:
-            print(f"[BoundaryPredictor.py] AFTER pooling:")
-        if flags.PRINT_DATA:
-            print(f"  pooled.shape = {pooled.shape}")
-
-        # ERROR CHECK: Detect if entire pooled output is empty
-        # if pooled.shape[1] == 0:
-        #     mode = "TRAINING" if self.training else "EVALUATION"
-        #     print(f"\n{'='*80}")
-        #     print(
-        #         f"[BoundaryPredictor.py] ERROR: Empty pooled output (no segments) in {mode} mode!")
-        #     print(f"{'='*80}")
-        #     print(f"DIAGNOSTICS:")
-        #     print(f"  Mode: {mode}")
-        #     print(f"  pooled.shape = {pooled.shape}")
-        #     print(f"  hidden.shape = {hidden.shape}")
-        #     print(f"  lengths = {lengths}")
-        #     print(f"  hard_boundaries.shape = {hard_boundaries.shape}")
-        #     print(
-        #         f"  hard_boundaries sum per sample = {hard_boundaries.sum(dim=1)}")
-        #     print(f"\n  All samples boundary info:")
-        #     for i in range(min(batch_size, 5)):
-        #         print(
-        #             f"    Sample {i}: sum = {hard_boundaries[i].sum().item()}, first 30 = {hard_boundaries[i, :30]}")
-        #     print(f"\n  probs (first 30 values for first 3 samples):")
-        #     for i in range(min(batch_size, 3)):
-        #         print(f"    Sample {i}: {probs[i, :30]}")
-        #     print(f"\n  Boundary predictor state:")
-        #     print(f"    self.training = {self.training}")
-        #     print(f"    self.temp = {self.temp}")
-        #     print(f"    self.prior = {self.prior}")
-        #     print(f"    self.similarity_bias = {self.similarity_bias.item()}")
-        #     print(f"{'='*80}\n")
-
-        # Compute shortened lengths based on boundary positions
-        batch_size = hard_boundaries.shape[0]
-        seq_len = hidden.shape[1]
+        # No boundary computation, so set dummy values for diagnostic outputs
+        num_boundaries = 0.0
         actual_lens = (lengths * seq_len).long()
+        total_positions = actual_lens.sum().float().item()
 
-        if flags.PRINT_FLOW:
-            print(f"[BoundaryPredictor.py] Computing shortened_lengths:")
-        if flags.PRINT_DATA:
-            print(f"  batch_size = {batch_size}")
-            print(f"  seq_len (hidden) = {seq_len}")
-            print(f"  actual_lens = {actual_lens}")
+        # No boundary loss since we're not computing boundaries
+        loss = torch.tensor(0.0, device=hidden.device)
+        if return_unreduced_boundary_loss:
+            loss = loss.repeat(batch_size)
 
-        # Get the actual pooled sequence length from the pooled tensor
-        max_segments = pooled.shape[1] if pooled.shape[1] > 0 else 1
-
-        if flags.PRINT_DATA:
-            print(f"  max_segments (from pooled) = {max_segments}")
-
-        # Vectorized calculation of shortened_lengths
-        # Create mask for valid positions within each sequence
-        boundary_seq_len = hard_boundaries.shape[1]
-        valid_lens = actual_lens.clamp(max=boundary_seq_len)
-        mask = torch.arange(boundary_seq_len, device=hard_boundaries.device).unsqueeze(
-            0) < valid_lens.unsqueeze(1)
-
-        # Count boundaries within valid length for each sample
-        num_boundaries_per_sample = (hard_boundaries * mask).sum(dim=1)
-
-        # IMPORTANT: Number of segments = number of boundaries + 1
-        # This is because segment_ids = cumsum(boundaries) - boundaries creates:
-        # - Segment 0 before any boundaries
-        # - One segment per boundary marker
-        # Example: 2 boundaries -> 3 segments (segment 0, 1, 2)
-        num_segments_per_sample = num_boundaries_per_sample + 1
-
-        # Clamp to max_segments and compute relative lengths
-        num_segments_per_sample = num_segments_per_sample.clamp(
-            max=max_segments)
-        shortened_lengths = num_segments_per_sample.float() / max(max_segments, 1)
-
-        if flags.PRINT_DATA:
-            print(
-                f"[BoundaryPredictor.py] shortened_lengths = {shortened_lengths}")
-
-        # ERROR CHECK: Detect if any sequence has zero-length output
-        # zero_length_mask = (shortened_lengths == 0.0)
-        # if zero_length_mask.any():
-        #     mode = "TRAINING" if self.training else "EVALUATION"
-        #     num_zero = zero_length_mask.sum().item()
-        #     print(f"\n{'='*80}")
-        #     print(
-        #         f"[BoundaryPredictor.py] ERROR: {num_zero} sequence(s) with zero-length output in {mode} mode!")
-        #     print(f"{'='*80}")
-        #     print(f"DIAGNOSTICS:")
-        #     print(f"  Mode: {mode}")
-        #     print(f"  pooled.shape = {pooled.shape}")
-        #     print(f"  hidden.shape = {hidden.shape}")
-        #     print(f"  lengths = {lengths}")
-        #     print(f"  shortened_lengths = {shortened_lengths}")
-        #     print(f"  zero_length_mask = {zero_length_mask}")
-        #     print(f"\n  hard_boundaries.shape = {hard_boundaries.shape}")
-        #     print(
-        #         f"  hard_boundaries sum per sample = {hard_boundaries.sum(dim=1)}")
-        #     print(f"\n  For samples with zero length:")
-        #     for i in range(batch_size):
-        #         if zero_length_mask[i]:
-        #             valid_len = actual_lens[i].item()
-        #             num_boundaries = hard_boundaries[i,
-        #                                              :valid_len].sum().item()
-        #             print(f"\n    Sample {i}:")
-        #             print(f"      input length = {lengths[i].item():.4f}")
-        #             print(f"      actual_len = {valid_len}")
-        #             print(f"      num_boundaries = {num_boundaries}")
-        #             print(f"      max_segments = {max_segments}")
-        #             print(f"      probs[:30] = {probs[i, :30]}")
-        #             print(
-        #                 f"      hard_boundaries[:30] = {hard_boundaries[i, :30]}")
-        #     print(f"\n  Boundary predictor state:")
-        #     print(f"    self.training = {self.training}")
-        #     print(f"    self.temp = {self.temp}")
-        #     print(f"    self.prior = {self.prior}")
-        #     print(f"    self.similarity_bias = {self.similarity_bias.item()}")
-        #     print(f"{'='*80}\n")
-
-        num_boundaries_tensor = hard_boundaries.sum()
-        seq_len = hidden.shape[1]
-
-        actual_lens = (lengths * seq_len).long()
-        total_positions_tensor = actual_lens.sum().float()
-
-        # Compute boundary loss
-        if self.training:
-            per_sample_loss = 10. * self.calc_loss_target_counts(
-                hard_boundaries,
-                soft_boundaries,
-                lengths,
-                target_boundary_counts,
-                reduce=False,
-            )
-
-            if return_unreduced_boundary_loss:
-                loss = per_sample_loss
-            else:
-                loss = per_sample_loss.mean()
-        else:
-            loss = torch.tensor(0.0, device=hidden.device)
-            if return_unreduced_boundary_loss:
-                loss = loss.repeat(batch_size)
-
-        num_boundaries = num_boundaries_tensor.item()
-        total_positions = total_positions_tensor.item()
-
-        # Diagnostic statistics removed for performance (loop-based computation too expensive)
+        # No diagnostic statistics
         boundary_cv = None
         boundary_adjacent_pct = None
 
         if flags.PRINT_FLOW:
-            print(f"[BoundaryPredictor.py] RETURN:")
+            print(f"[BoundaryPredictor.py] IDENTITY FORWARD COMPLETE:")
         if flags.PRINT_DATA:
-            print(f"  pooled.shape = {pooled.shape}")
-            print(f"  shortened_lengths.shape = {shortened_lengths.shape}")
-            print(f"  shortened_lengths = {shortened_lengths}")
-            print(f"  num_boundaries = {num_boundaries}")
+            print(f"  pooled.shape = {pooled.shape} (same as input)")
+            print(f"  shortened_lengths = {shortened_lengths} (same as input)")
+            print(f"  num_boundaries = {num_boundaries} (no boundaries computed)")
             print(f"  total_positions = {total_positions}")
 
         return (
@@ -693,7 +453,7 @@ class BoundaryPredictor2(nn.Module):
         Implements the Ratio Loss from H-Net (Equation 10).
 
         This loss guides the model toward a target compression ratio N.
-        Crucially, gradients only flow through G (the average probability), 
+        Crucially, gradients only flow through G (the average probability),
         while F (the actual count) is treated as a non-differentiable constant.
         """
         # N: Target compression ratio (e.g., 6.0 for 1-stage)

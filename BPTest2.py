@@ -1,24 +1,19 @@
 """
-BPTest.py - FULL END-TO-END BOUNDARYPREDICTOR
+BPTest2.py - STAGE 2: ATTENTION POOLING LEARNING
 
-Complete BoundaryPredictor implementation with both boundary learning and attention pooling.
+Tests attention pooling in isolation with fixed boundaries (all 1s).
 
-CURRENT CONFIGURATION - FULLY TRAINABLE:
+CURRENT CONFIGURATION - STAGE 2:
 
-1. BOUNDARY DETECTION: FULLY ENABLED AND TRAINABLE
-   - Learns to predict boundaries based on cosine similarity of adjacent frames
-   - Uses Q/K projections with MLP + residual connections
-   - RelaxedBernoulli sampling during training, thresholding during eval
-   - Temperature scheduling from 1.0 → 0.0 over training
-   - Proper length masking and safety checks (ensures ≥1 boundary per sequence)
-   - Trainable parameters:
-     * boundary_mlp (2-layer MLP with GELU)
-     * q_proj_layer, k_proj_layer (Q/K projection matrices)
-     * similarity_bias (learnable bias for boundary probability)
+1. BOUNDARY DETECTION: DISABLED (FIXED BOUNDARIES)
+   - All positions set as boundaries (boundaries = all 1s except padding)
+   - No boundary learning - boundaries are completely fixed
+   - Effectively 1x compression (no compression at all)
+   - Boundary detection parameters exist but are NOT used
 
 2. ATTENTION POOLING: FULLY ENABLED AND TRAINABLE
    - Multi-head attention pooling with learned query vector
-   - Pools variable-length segments based on detected boundaries
+   - Each token is its own segment (since all boundaries = 1)
    - LayerNorm applied before key/value projections
    - Trainable parameters:
      * learned_query (attention query vector)
@@ -26,22 +21,26 @@ CURRENT CONFIGURATION - FULLY TRAINABLE:
      * pool_layernorm (layer normalization)
    - Identity initialization for stable learning
 
-3. BOUNDARY LOSS: ENABLED
-   - Binomial loss based on phoneme count targets (from g2p_en)
-   - Encourages boundary count to match ground-truth phoneme count
-   - Weight: 10.0x (configurable via boundary_predictor_loss_weight)
+3. BOUNDARY LOSS: DISABLED
+   - Loss always returns 0.0
+   - No gradient signal for boundary prediction
 
-4. COMPRESSION: LEARNED AND VARIABLE
-   - Compression ratio learned dynamically based on input
-   - Target: ~5-10x compression (adjustable via prior parameter)
-   - Output lengths vary per sample based on predicted boundaries
+4. COMPRESSION: NONE (1x)
+   - Output length equals input length
+   - Each position becomes its own segment
+   - Proper padding masking maintained
+
+PURPOSE:
+Test if attention pooling can learn useful representations when given every
+token as its own segment. This isolates attention pooling learning from
+boundary detection complexity.
 
 PROGRESSION:
 ✓ Stage 1: Frozen pooling, fixed boundaries=1s → Baseline (no-op)
-✓ Stage 2: Trainable pooling, fixed boundaries=1s → Test pooling learning
-✓ Stage 3: Trainable pooling, learned boundaries → FULL SYSTEM (current)
+✓ Stage 2: Trainable pooling, fixed boundaries=1s → TEST POOLING (current)
+- Stage 3: Trainable pooling, learned boundaries → Full system (see BPTest.py)
 
-This is the complete BoundaryPredictor ready for end-to-end training!
+Use this to verify attention pooling learns properly before enabling boundaries!
 """
 
 import torch
@@ -194,10 +193,10 @@ class BoundaryPredictor2(nn.Module):
         # Compute actual lengths for each batch item
         actual_lens = (lengths * seq_len).long()
 
-        # Create length mask for segment_mask (vectorized)
-        length_mask = torch.arange(seq_len, device=device).unsqueeze(
-            0) < actual_lens.unsqueeze(1)
-        length_mask = length_mask.float()
+        # Create length mask for segment_mask
+        length_mask = torch.zeros(batch_size, seq_len, device=device)
+        for i in range(batch_size):
+            length_mask[i, :actual_lens[i]] = 1.0
 
         # Apply length mask to segment_mask
         segment_mask = segment_mask * length_mask.unsqueeze(-1)
@@ -300,11 +299,11 @@ class BoundaryPredictor2(nn.Module):
         # Create binary segment mask (B x L x S)
         segment_mask = (foo == 0).float()  # B x L x S
 
-        # Apply length masking (vectorized)
+        # Apply length masking
         actual_lens = (lengths * seq_len).long()
-        length_mask = torch.arange(seq_len, device=device).unsqueeze(
-            0) < actual_lens.unsqueeze(1)
-        length_mask = length_mask.float()
+        length_mask = torch.zeros(batch_size, seq_len, device=device)
+        for i in range(batch_size):
+            length_mask[i, :actual_lens[i]] = 1.0
 
         # Apply length mask to segment_mask
         segment_mask = segment_mask * length_mask.unsqueeze(-1)  # B x L x S
@@ -408,62 +407,47 @@ class BoundaryPredictor2(nn.Module):
             soft_boundaries = probs
             hard_samples = (probs > 0.5).float()
 
-        # Mask boundaries based on lengths (vectorized)
+        # Mask boundaries based on lengths
         batch_size, boundary_seq_len = soft_boundaries.shape
         # +1 because boundaries are seq_len-1
         actual_lens = (lengths * (boundary_seq_len + 1)).long()
 
-        # Compute valid lengths for each sample
-        valid_lens = torch.clamp(actual_lens - 1, min=0, max=boundary_seq_len)
-
-        # Create position indices: [batch_size, boundary_seq_len]
-        position_indices = torch.arange(
-            boundary_seq_len, device=soft_boundaries.device).unsqueeze(0).expand(batch_size, -1)
-
-        # Create masks for valid and boundary positions
-        valid_mask = position_indices < valid_lens.unsqueeze(
-            1)  # [batch_size, boundary_seq_len]
-        needs_padding = valid_lens < boundary_seq_len
-        boundary_position_mask = (
-            position_indices == valid_lens.unsqueeze(1)) & needs_padding.unsqueeze(1)
-
-        # Zero out padding positions and set boundary positions
-        soft_boundaries = soft_boundaries * \
-            valid_mask.float() + boundary_position_mask.float()
-        hard_samples = hard_samples * valid_mask.float() + boundary_position_mask.float()
+        # Create mask and apply
+        for i in range(batch_size):
+            valid_len = min(actual_lens[i].item() - 1, boundary_seq_len)
+            if valid_len < boundary_seq_len:
+                # Zero out padding positions
+                soft_boundaries[i, valid_len:] = 0.0
+                hard_samples[i, valid_len:] = 0.0
+                # Set first padding position as boundary
+                if valid_len >= 0 and valid_len < boundary_seq_len:
+                    soft_boundaries[i, valid_len] = 1.0
+                    hard_samples[i, valid_len] = 1.0
 
         # Straight-through estimator: hard values for forward, soft gradients for backward
         hard_boundaries = (
             hard_samples - soft_boundaries.detach() + soft_boundaries
         )
 
-        # Ensure each sequence has at least one boundary to prevent empty segments (vectorized)
+        # Ensure each sequence has at least one boundary to prevent empty segments
         # This is a safeguard that should rarely trigger
         boundary_seq_len = hard_boundaries.shape[1]
+        sequences_with_no_boundaries = []
+        for i in range(batch_size):
+            # Check if this sequence has any boundaries
+            if hard_boundaries[i].sum() == 0:
+                sequences_with_no_boundaries.append(i)
+                # Add boundary at the last valid position (ensure within bounds)
+                valid_len = min(actual_lens[i].item() - 1, boundary_seq_len)
+                boundary_idx = min(valid_len, boundary_seq_len - 1)
+                if boundary_idx >= 0:
+                    hard_boundaries[i, boundary_idx] = 1.0
 
-        # Find sequences with no boundaries
-        has_no_boundaries = hard_boundaries.sum(dim=1) == 0  # [batch_size]
-
-        if has_no_boundaries.any():
-            # Compute boundary indices for sequences that need them
-            valid_lens_for_boundary = torch.clamp(
-                actual_lens - 1, min=0, max=boundary_seq_len - 1)
-
-            # Create a one-hot tensor for the boundary positions
-            boundary_indices = valid_lens_for_boundary[has_no_boundaries]
-            batch_indices = torch.arange(batch_size, device=hard_boundaries.device)[
-                has_no_boundaries]
-
-            # Set boundaries at the computed positions
-            hard_boundaries[batch_indices, boundary_indices] = 1.0
-
-            # Print warning if this happens during training (should be rare)
-            if self.training:
-                num_affected = has_no_boundaries.sum().item()
-                sequences_with_no_boundaries = batch_indices.cpu().tolist()
-                print(
-                    f"[BoundaryPredictor.py] WARNING: Added emergency boundary for {num_affected} sequence(s) with no boundaries during TRAINING")
-                print(f"  Affected sequences: {sequences_with_no_boundaries}")
+        # Print warning if this happens during training (should be rare)
+        if len(sequences_with_no_boundaries) > 0 and self.training:
+            print(
+                f"[BoundaryPredictor.py] WARNING: Added emergency boundary for {len(sequences_with_no_boundaries)} sequence(s) with no boundaries during TRAINING")
+            print(f"  Affected sequences: {sequences_with_no_boundaries}")
 
         if flags.PRINT_FLOW:
             print(f"[BoundaryPredictor.py] BEFORE pooling:")
@@ -622,9 +606,53 @@ class BoundaryPredictor2(nn.Module):
         num_boundaries = num_boundaries_tensor.item()
         total_positions = total_positions_tensor.item()
 
-        # Diagnostic statistics removed for performance (loop-based computation too expensive)
+        # Compute diagnostic statistics for boundary spacing
         boundary_cv = None
         boundary_adjacent_pct = None
+
+        with torch.no_grad():
+            all_spacings = []
+            adjacent_count = 0
+            total_boundaries = 0
+
+            for b in range(batch_size):
+                # Get boundary positions for this sample
+                seq_len = hard_samples.shape[1]
+                # +1 because hard_samples is seq_len-1
+                actual_len = (lengths[b] * (seq_len + 1)).long().item()
+                valid_length = min(actual_len - 1, seq_len)
+                boundaries_b = hard_samples[b, :valid_length]
+
+                # Find positions where boundaries occur
+                boundary_positions = boundaries_b.nonzero(as_tuple=True)[0]
+
+                if len(boundary_positions) > 1:
+                    # Calculate spacings between consecutive boundaries
+                    spacings = boundary_positions[1:] - boundary_positions[:-1]
+                    all_spacings.extend(spacings.cpu().tolist())
+
+                    # Count adjacent boundaries (spacing == 1)
+                    adjacent_count += (spacings == 1).sum().item()
+                    # Number of gaps between boundaries
+                    total_boundaries += len(boundary_positions) - 1
+
+            # Calculate coefficient of variation (CV = std / mean)
+            if len(all_spacings) > 0:
+                spacings_tensor = torch.tensor(
+                    all_spacings, dtype=torch.float32)
+                mean_spacing = spacings_tensor.mean()
+                std_spacing = spacings_tensor.std()
+                if mean_spacing > 0:
+                    boundary_cv = (std_spacing / mean_spacing).item()
+                else:
+                    boundary_cv = 0.0
+
+            # Calculate adjacent percentage
+            if total_boundaries > 0:
+                boundary_adjacent_pct = (
+                    adjacent_count / total_boundaries) * 100.0
+            else:
+                boundary_adjacent_pct = 0.0
 
         if flags.PRINT_FLOW:
             print(f"[BoundaryPredictor.py] RETURN:")

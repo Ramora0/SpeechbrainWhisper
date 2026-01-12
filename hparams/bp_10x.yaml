@@ -362,7 +362,7 @@ train_logger: !new:speechbrain.utils.train_logger.WandBLogger
   initializer: !name:wandb.init
   entity: null
   project: glimpse-pretraining
-  name: !ref conformer_small_<seed>
+  name: !ref <experiment_name>_<seed>
   dir: !ref <output_folder>
   reinit: True
   # yaml_config: hparams/conformer_small.yaml
