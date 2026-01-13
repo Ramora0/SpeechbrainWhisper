@@ -51,4 +51,5 @@ mkdir -p "$TMPDIR/LibriSpeech" "$TMPDIR/data_manifests"
 rsync -a --info=progress2 /fs/scratch/PAS2836/lees_stuff/librispeechbrain/LibriSpeech/ "$TMPDIR/LibriSpeech/" && \
 rsync -a --info=progress2 /fs/scratch/PAS2836/lees_stuff/librispeechbrain/data_manifests/ "$TMPDIR/data_manifests/"
 
+source .v100/bin/activate
 python pretrain_no_ctc.py "${HPARAMS_PATH}" "$@"
