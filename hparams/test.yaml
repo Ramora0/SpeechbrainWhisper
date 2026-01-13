@@ -138,9 +138,7 @@ test_beam_size: 66
 lm_weight: 0.60
 
 # BoundaryPredictor2 parameters
-# Total compression: 10.4x = 16x (CNN) * 0.65x (BP)
-# BP prior = 1/0.65 ≈ 1.54
-boundary_predictor_prior: 1
+boundary_predictor_prior: 0.25
 boundary_predictor_temp: 1.0
 boundary_predictor_loss_weight: 1.0
 
