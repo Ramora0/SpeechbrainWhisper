@@ -12,7 +12,7 @@
 seed: 58008
 experiment_name: n_ctc_4x
 __set_seed: !apply:speechbrain.utils.seed_everything [!ref <seed>]
-output_folder: !ref /fs/scratch/PAS2836/lees_stuff/librispeechbrain/results/conformer_small/58008
+output_folder: !ref /fs/scratch/PAS2836/lees_stuff/librispeechbrain/results/<experiment_name>/<seed>
 output_wer_folder: !ref <output_folder>/
 save_folder: !ref <output_folder>/save
 train_log: !ref <output_folder>/train_log.txt
@@ -166,7 +166,7 @@ Transformer:
 
 # This is the TransformerLM that is used according to the Huggingface repository
 # Visit the HuggingFace model corresponding to the pretrained_lm_tokenizer_path
-# For more details about the model!
+# For more details  about the model!
 # NB: It has to match the pre-trained TransformerLM!!
 lm_model:
   !new:speechbrain.lobes.models.transformer.TransformerLM.TransformerLM # yamllint disable-line rule:line-length
