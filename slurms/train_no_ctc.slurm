@@ -42,7 +42,7 @@ echo "Node: ${SLURM_NODELIST}"
 echo "Hparams: ${HPARAMS_PATH}"
 
 module purge
-module load cuda  # needed for GPU jobs on OSC  [oai_citation:6‡Ohio Supercomputer Center](https://www.osc.edu/resources/technical_support/supercomputers/gpu_computing?utm_source=chatgpt.com)
+module load cuda/12.4.1  # Use 'module spider cuda' to see available versions
 
 cd "${SLURM_SUBMIT_DIR}"
 
