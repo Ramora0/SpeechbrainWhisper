@@ -313,15 +313,15 @@ class ASR(sb.core.Brain):
         # Add boundary predictor loss
         if stage == sb.Stage.TRAIN:
             loss_boundary = self.boundary_predictor_loss
-            print(f"Binomial loss: {loss_boundary.item():.6f}")
+            if loss_boundary.item() > 0:
+                print(f"Binomial loss: {loss_boundary.item():.6f}")
         else:
             loss_boundary = torch.tensor(0.0, device=p_seq.device)
 
         # Combine losses (seq2seq only, no CTC)
-        loss = (
-            loss_seq
-            + self.hparams.boundary_predictor_loss_weight * loss_boundary
-        )
+        # Only add boundary loss if use_bp is enabled
+        boundary_loss_weight = getattr(self.hparams, "boundary_predictor_loss_weight", 0.0)
+        loss = loss_seq + boundary_loss_weight * loss_boundary
 
         if stage != sb.Stage.TRAIN:
             current_epoch = self.hparams.epoch_counter.current
