@@ -161,7 +161,7 @@ class ASR(sb.core.Brain):
         boundary_adjacent_pct = None
 
         # Check if BoundaryPredictor should be used
-        use_bp = self.hparams.get("use_bp", True)
+        use_bp = self.hparams.use_bp
 
         if use_bp:
             # Apply BoundaryPredictor
@@ -363,7 +363,7 @@ class ASR(sb.core.Brain):
             self.wer_metric = self.hparams.error_rate_computer()
         else:
             # Schedule temperature from 1.0 to 0.0 over training (only if BP is used)
-            use_bp = self.hparams.get("use_bp", True)
+            use_bp = self.hparams.use_bp
             if use_bp:
                 # Keep temperature 1 step behind to prevent it from reaching 0 (which causes NaN)
                 total_epochs = self.hparams.number_of_epochs
