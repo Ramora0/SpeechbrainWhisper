@@ -77,7 +77,7 @@ n_mels: 80
 # This setup is optimized for V100 32GB GPU
 # Or turn it off (but training speed will decrease)
 dynamic_batching: True
-max_batch_length_train: 1000
+max_batch_length_train: 2000
 max_batch_length_val: 150 # we reduce it as the beam is much wider (VRAM)
 num_bucket: 200
 shuffle: True # if true re-creates batches at each epoch shuffling examples.
