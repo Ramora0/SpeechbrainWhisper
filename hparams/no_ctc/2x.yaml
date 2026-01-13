@@ -10,7 +10,7 @@
 # Seed needs to be set at top of yaml, before objects with parameters are made
 
 seed: 58008
-experiment_name: no_ctc_4x
+experiment_name: no_ctc_2x
 use_bp: False
 __set_seed: !apply:speechbrain.utils.seed_everything [!ref <seed>]
 output_folder: !ref /fs/scratch/PAS2836/lees_stuff/librispeechbrain/results/<experiment_name>/<seed>
@@ -139,14 +139,28 @@ lm_weight: 0.60
 
 ############################## Models ##########################################
 
-CNN: !new:speechbrain.lobes.models.convolution.ConvolutionFrontEnd
+# Main ConvolutionFrontEnd
+conv_frontend: !new:speechbrain.lobes.models.convolution.ConvolutionFrontEnd
   input_shape: (8, 10, 80)
-  num_blocks: 2
+  num_blocks: 1
   num_layers_per_block: 1
-  out_channels: (64, 32)
-  kernel_sizes: (3, 3)
-  strides: (2, 2)
-  residuals: (False, False)
+  out_channels: (64)
+  kernel_sizes: (3)
+  strides: (2)
+  residuals: (False)
+
+# Additional time-only striding convolution layer (after ConvolutionFrontEnd)
+time_stride_conv: !new:speechbrain.nnet.CNN.Conv2d
+  in_channels: 64
+  out_channels: 32
+  kernel_size: (3, 3)
+  stride: (2, 1)
+  padding: same
+
+# Combine them in sequence
+CNN: !new:torch.nn.Sequential
+  - !ref <conv_frontend>
+  - !ref <time_stride_conv>
 
 Transformer:
   !new:speechbrain.lobes.models.transformer.TransformerASR.TransformerASR # yamllint disable-line rule:line-length
