@@ -11,6 +11,7 @@
 
 seed: 58008
 experiment_name: bp_phonemez
+use_bp: True
 __set_seed: !apply:speechbrain.utils.seed_everything [!ref <seed>]
 output_folder: !ref /fs/scratch/PAS2836/lees_stuff/librispeechbrain/results/<experiment_name>/<seed>
 output_wer_folder: !ref <output_folder>/
@@ -146,7 +147,7 @@ boundary_predictor_temp: 1.0
 boundary_predictor_loss_weight: 1.0
 
 # Phoneme-based boundary targets
-use_phoneme_boundary_targets: True # Enable phoneme counting
+target_phonemes: True # Enable phoneme counting
 
 ############################## Models ##########################################
 
