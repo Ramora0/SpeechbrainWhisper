@@ -160,68 +160,72 @@ class ASR(sb.core.Brain):
         boundary_cv = None
         boundary_adjacent_pct = None
 
-        # Apply BoundaryPredictor
-        if flags.PRINT_FLOW:
-            print(f"[pretrain.py] BEFORE BoundaryPredictor:")
-        if flags.PRINT_DATA:
-            print(f"  enc.shape = {enc.shape}")
-            print(f"  enc_lens.shape = {enc_lens.shape}")
-            print(f"  enc_lens = {enc_lens}")
+        # Check if BoundaryPredictor should be used
+        use_bp = self.hparams.get("use_bp", True)
 
-        # Compute target boundary counts
-
-        # Option 1: Phoneme-based targets (old approach - commented out)
-        # if stage == sb.Stage.TRAIN:
-        #     # Count phonemes from text
-        #     target_boundary_counts = count_phonemes_batch(batch.wrd)
-        #
-        #     if flags.PRINT_DATA:
-        #         print(f"[Phoneme Targets] text: {batch.wrd[0][:50]}...")
-        #         print(
-        #             f"[Phoneme Targets] target_counts: {target_boundary_counts[:5]}")
-        # else:
-        #     target_boundary_counts = None
-
-        # Option 2: Prior-based targets (current approach)
-        # The prior determines the desired compression rate:
-        # - prior = 1.0 means no compression (1 boundary per position)
-        # - prior = 2.0 means 2x compression (1 boundary per 2 positions)
-        # target_counts = total_positions / prior
-        if stage == sb.Stage.TRAIN:
-            prior = self.hparams.boundary_predictor_prior
-            batch_size, seq_len, _ = enc.shape
-            # Total positions for each sequence (accounting for variable lengths)
-            total_positions = (enc_lens * seq_len).float()
-            # Target boundary counts based on prior
-            target_boundary_counts = (
-                total_positions / prior).round().clamp(min=1.0)
-
+        if use_bp:
+            # Apply BoundaryPredictor
+            if flags.PRINT_FLOW:
+                print(f"[pretrain.py] BEFORE BoundaryPredictor:")
             if flags.PRINT_DATA:
-                print(f"[Target Boundaries] prior: {prior}")
-                print(
-                    f"[Target Boundaries] total_positions: {total_positions[:5]}")
-                print(
-                    f"[Target Boundaries] target_counts: {target_boundary_counts[:5]}")
-        else:
-            target_boundary_counts = None
+                print(f"  enc.shape = {enc.shape}")
+                print(f"  enc_lens.shape = {enc_lens.shape}")
+                print(f"  enc_lens = {enc_lens}")
 
-        # Apply BoundaryPredictor with lengths (overwrites enc and enc_lens)
-        (enc, bp_loss, num_boundaries, total_positions,
-         enc_lens, boundary_cv, boundary_adjacent_pct) = self.modules.BoundaryPredictor(
-            hidden=enc,
-            lengths=enc_lens,
-            target_boundary_counts=target_boundary_counts,
-            return_unreduced_boundary_loss=False
-        )
+            # Compute target boundary counts
 
-        if flags.PRINT_FLOW:
-            print(f"[pretrain.py] AFTER BoundaryPredictor:")
-        if flags.PRINT_DATA:
-            print(f"  enc.shape = {enc.shape}")
-            print(f"  enc_lens.shape = {enc_lens.shape}")
-            print(f"  enc_lens = {enc_lens}")
-            print(f"  num_boundaries = {num_boundaries}")
-            print(f"  total_positions = {total_positions}")
+            # Option 1: Phoneme-based targets (old approach - commented out)
+            # if stage == sb.Stage.TRAIN:
+            #     # Count phonemes from text
+            #     target_boundary_counts = count_phonemes_batch(batch.wrd)
+            #
+            #     if flags.PRINT_DATA:
+            #         print(f"[Phoneme Targets] text: {batch.wrd[0][:50]}...")
+            #         print(
+            #             f"[Phoneme Targets] target_counts: {target_boundary_counts[:5]}")
+            # else:
+            #     target_boundary_counts = None
+
+            # Option 2: Prior-based targets (current approach)
+            # The prior determines the desired compression rate:
+            # - prior = 1.0 means no compression (1 boundary per position)
+            # - prior = 2.0 means 2x compression (1 boundary per 2 positions)
+            # target_counts = total_positions / prior
+            if stage == sb.Stage.TRAIN:
+                prior = self.hparams.boundary_predictor_prior
+                batch_size, seq_len, _ = enc.shape
+                # Total positions for each sequence (accounting for variable lengths)
+                total_positions = (enc_lens * seq_len).float()
+                # Target boundary counts based on prior
+                target_boundary_counts = (
+                    total_positions / prior).round().clamp(min=1.0)
+
+                if flags.PRINT_DATA:
+                    print(f"[Target Boundaries] prior: {prior}")
+                    print(
+                        f"[Target Boundaries] total_positions: {total_positions[:5]}")
+                    print(
+                        f"[Target Boundaries] target_counts: {target_boundary_counts[:5]}")
+            else:
+                target_boundary_counts = None
+
+            # Apply BoundaryPredictor with lengths (overwrites enc and enc_lens)
+            (enc, bp_loss, num_boundaries, total_positions,
+             enc_lens, boundary_cv, boundary_adjacent_pct) = self.modules.BoundaryPredictor(
+                hidden=enc,
+                lengths=enc_lens,
+                target_boundary_counts=target_boundary_counts,
+                return_unreduced_boundary_loss=False
+            )
+
+            if flags.PRINT_FLOW:
+                print(f"[pretrain.py] AFTER BoundaryPredictor:")
+            if flags.PRINT_DATA:
+                print(f"  enc.shape = {enc.shape}")
+                print(f"  enc_lens.shape = {enc_lens.shape}")
+                print(f"  enc_lens = {enc_lens}")
+                print(f"  num_boundaries = {num_boundaries}")
+                print(f"  total_positions = {total_positions}")
 
         # Store BP outputs for logging
         self.boundary_predictor_loss = bp_loss
@@ -230,16 +234,6 @@ class ASR(sb.core.Brain):
         self.boundary_cv = boundary_cv
         self.boundary_adjacent_pct = boundary_adjacent_pct
         # === End BoundaryPredictor Integration ===
-
-        # Explicitly zero out padding positions
-        # batch_size, seq_len, hidden_dim = enc.shape
-        # # Create mask: True for valid positions, False for padding
-        # lengths_abs = (enc_lens * seq_len).long()
-        # mask = torch.arange(seq_len, device=enc.device).unsqueeze(
-        #     0) < lengths_abs.unsqueeze(1)
-        # # Expand mask to match hidden dimension and zero out padding
-        # mask = mask.unsqueeze(-1).expand_as(enc)
-        # enc = enc * mask.float()
 
         if flags.PRINT_FLOW:
             print(f"[pretrain.py] BEFORE Transformer:")
@@ -368,18 +362,20 @@ class ASR(sb.core.Brain):
             self.acc_metric = self.hparams.acc_computer()
             self.wer_metric = self.hparams.error_rate_computer()
         else:
-            # Schedule temperature from 1.0 to 0.0 over training
-            # Keep temperature 1 step behind to prevent it from reaching 0 (which causes NaN)
-            total_epochs = self.hparams.number_of_epochs
-            if total_epochs > 1:
-                # Clamp epoch to stay 1 step behind, preventing temperature from reaching 0
-                effective_epoch = min(epoch, total_epochs - 2)
-                temperature = 1.0 - (effective_epoch / (total_epochs - 1))
-            else:
-                temperature = 1.0
-            self.modules.BoundaryPredictor.set_temperature(temperature)
-            logger.info(
-                f"Epoch {epoch}: BoundaryPredictor temperature = {temperature:.4f}")
+            # Schedule temperature from 1.0 to 0.0 over training (only if BP is used)
+            use_bp = self.hparams.get("use_bp", True)
+            if use_bp:
+                # Keep temperature 1 step behind to prevent it from reaching 0 (which causes NaN)
+                total_epochs = self.hparams.number_of_epochs
+                if total_epochs > 1:
+                    # Clamp epoch to stay 1 step behind, preventing temperature from reaching 0
+                    effective_epoch = min(epoch, total_epochs - 2)
+                    temperature = 1.0 - (effective_epoch / (total_epochs - 1))
+                else:
+                    temperature = 1.0
+                self.modules.BoundaryPredictor.set_temperature(temperature)
+                logger.info(
+                    f"Epoch {epoch}: BoundaryPredictor temperature = {temperature:.4f}")
 
     def on_stage_end(self, stage, stage_loss, epoch):
         """Gets called at the end of a epoch."""
