@@ -25,7 +25,14 @@ class BoundaryPredictor2(nn.Module):
         self.q_proj_layer = nn.Linear(input_dim, input_dim, bias=False)
         self.k_proj_layer = nn.Linear(input_dim, input_dim, bias=False)
 
-        self.similarity_bias = nn.Parameter(torch.tensor(0.098))
+        # Calculate initial similarity bias based on prior
+        # prior = 0.5 (2x compression) gives bias = 0 (baseline)
+        # Lower prior (more compression) gives higher bias
+        # Formula: bias = k * (compression_rate - 2)
+        # where compression_rate = 1/prior and k ≈ 0.03
+        compression_rate = 1.0 / prior
+        initial_bias = 0.1 * (compression_rate - 2.0)
+        self.similarity_bias = nn.Parameter(torch.tensor(initial_bias))
 
         with torch.no_grad():
             self.q_proj_layer.weight.copy_(torch.eye(input_dim))
