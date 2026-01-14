@@ -9,7 +9,7 @@
 # ############################################################################
 # Seed needs to be set at top of yaml, before objects with parameters are made
 
-seed: 58008
+seed: 42
 experiment_name: no_ctc_4x
 use_bp: False
 __set_seed: !apply:speechbrain.utils.seed_everything [!ref <seed>]
