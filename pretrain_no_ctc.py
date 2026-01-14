@@ -187,8 +187,9 @@ class ASR(sb.core.Brain):
                     # Clamp to valid range based on actual sequence lengths
                     batch_size, seq_len, _ = enc.shape
                     max_boundaries = (enc_lens * seq_len).float()
+                    min_boundaries = torch.ones_like(max_boundaries)
                     target_boundary_counts = target_boundary_counts.clamp(
-                        min=1.0, max=max_boundaries)
+                        min=min_boundaries, max=max_boundaries)
 
                     if flags.PRINT_DATA:
                         print(f"[Phoneme Targets] text: {batch.wrd[0][:50]}...")
