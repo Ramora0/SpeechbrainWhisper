@@ -5,13 +5,14 @@
 # Tokens: unigram
 # losses: KLdiv (Label Smoothing loss) + Boundary Loss
 # Training: Librispeech 960h
-# Total compression: 4x = 2x (CNN) × 2x (BoundaryPredictor)
+# Total compression: ~21x = 4x (CNN) × ~5.2x (BoundaryPredictor)
+# Note: This targets the same average compression as phoneme-based (2x_p.yaml)
 # Authors:  Jianyuan Zhong, Titouan Parcollet, Samuele Cornell
 # ############################################################################
 # Seed needs to be set at top of yaml, before objects with parameters are made
 
 seed: 58008
-experiment_name: bp_2x_2x
+experiment_name: bp_2x_5.2x
 use_bp: True
 __set_seed: !apply:speechbrain.utils.seed_everything [!ref <seed>]
 output_folder: !ref /fs/scratch/PAS2836/lees_stuff/librispeechbrain/results/<experiment_name>/<seed>
@@ -140,9 +141,9 @@ test_beam_size: 66
 lm_weight: 0.60
 
 # BoundaryPredictor2 parameters
-# Total compression: 4x = 2x (CNN) * 2x (BP)
-# BP prior = 1/2 = 0.5
-boundary_predictor_prior: 0.5
+# Total compression: ~21x = 4x (CNN) * ~5.2x (BP)
+# BP prior = 1/5.2 ≈ 0.192 (matches average phoneme-based compression)
+boundary_predictor_prior: 0.192
 boundary_predictor_temp: 1.0
 boundary_predictor_loss_weight: 1.0
 
@@ -151,7 +152,7 @@ target_phonemes: False
 
 ############################## Models ##########################################
 
-# Main ConvolutionFrontEnd (2x compression in time)
+# CNN: 4x compression in time (2x from conv_frontend + 2x from time_stride_conv)
 conv_frontend: !new:speechbrain.lobes.models.convolution.ConvolutionFrontEnd
   input_shape: (8, 10, 80)
   num_blocks: 1
@@ -161,7 +162,7 @@ conv_frontend: !new:speechbrain.lobes.models.convolution.ConvolutionFrontEnd
   strides: (2)
   residuals: (False)
 
-# Additional convolution layer (no time compression, just channel reduction)
+# Additional time-only striding convolution layer (2x time compression)
 time_stride_conv: !new:speechbrain.nnet.CNN.Conv2d
   in_channels: 64
   out_channels: 32
