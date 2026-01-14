@@ -9,7 +9,7 @@
 # ############################################################################
 # Seed needs to be set at top of yaml, before objects with parameters are made
 
-seed: 3407
+seed: 42
 experiment_name: no_ctc_large_4x
 use_bp: False
 __set_seed: !apply:speechbrain.utils.seed_everything [!ref <seed>]
@@ -65,7 +65,7 @@ precision: fp16 # bf16, fp16 or fp32
 avg_checkpoints: 10 # Number of checkpoints to average for evaluation
 
 # stages related parameters
-lr_adam: 0.0016
+lr_adam: 0.0008
 warmup: 50000
 augment_warmup: 8000
 
