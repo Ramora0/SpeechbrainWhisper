@@ -145,6 +145,7 @@ lm_weight: 0.60
 boundary_predictor_prior: 0.5
 boundary_predictor_temp: 1.0
 boundary_predictor_loss_weight: 1.0
+boundary_predictor_similarity_bias: -0.7
 
 # Prior-based boundary targets (not phoneme-based)
 target_phonemes: False
@@ -194,6 +195,7 @@ BoundaryPredictor: !new:BoundaryPredictor.BoundaryPredictor2
   input_dim: 640
   prior: !ref <boundary_predictor_prior>
   temp: !ref <boundary_predictor_temp>
+  similarity_bias: !ref <boundary_predictor_similarity_bias>
 
 # This is the TransformerLM that is used according to the Huggingface repository
 # Visit the HuggingFace model corresponding to the pretrained_lm_tokenizer_path
