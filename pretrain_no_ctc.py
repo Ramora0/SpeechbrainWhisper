@@ -760,7 +760,7 @@ if __name__ == "__main__":
 
     # Training
     # Profiler settings
-    enable_profiler = hparams.get("enable_profiler", True)
+    enable_profiler = hparams.get("enable_profiler", False)
     profiler_wait = hparams.get("profiler_wait", 0)
     profiler_warmup = hparams.get("profiler_warmup", 10)
     profiler_active = hparams.get("profiler_active", 10)
