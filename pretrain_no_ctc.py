@@ -198,17 +198,17 @@ class ASR(sb.core.Brain):
                             f"[Phoneme Targets] target_counts: {target_boundary_counts[:5]}")
                 else:
                     # Option 2: Prior-based targets (fixed compression rate)
-                    # The prior determines the desired compression rate:
-                    # - prior = 1.0 means no compression (1 boundary per position)
-                    # - prior = 2.0 means 2x compression (1 boundary per 2 positions)
-                    # target_counts = total_positions / prior
+                    # The prior determines the desired boundary probability:
+                    # - prior = 0.5 means 2x compression (1 boundary per 2 positions)
+                    # - prior = 0.25 means 4x compression (1 boundary per 4 positions)
+                    # target_counts = total_positions * prior
                     prior = self.hparams.boundary_predictor_prior
                     batch_size, seq_len, _ = enc.shape
                     # Total positions for each sequence (accounting for variable lengths)
                     total_positions = (enc_lens * seq_len).float()
                     # Target boundary counts based on prior
                     target_boundary_counts = (
-                        total_positions / prior).round().clamp(min=1.0)
+                        total_positions * prior).round().clamp(min=1.0)
 
                     if flags.PRINT_DATA:
                         print(f"[Prior Targets] prior: {prior}")
