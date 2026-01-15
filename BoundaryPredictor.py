@@ -143,8 +143,10 @@ class BoundaryPredictor2(nn.Module):
         actual_lens = (lengths * seq_len).long()
 
         # Create length mask for segment_mask (vectorized)
-        pos_indices = torch.arange(seq_len, device=device).unsqueeze(0)  # (1, L)
-        length_mask = (pos_indices < actual_lens.unsqueeze(1)).float()  # (B, L)
+        pos_indices = torch.arange(
+            seq_len, device=device).unsqueeze(0)  # (1, L)
+        length_mask = (pos_indices < actual_lens.unsqueeze(1)
+                       ).float()  # (B, L)
 
         # Apply length mask to segment_mask
         segment_mask = segment_mask * length_mask.unsqueeze(-1)
@@ -158,21 +160,27 @@ class BoundaryPredictor2(nn.Module):
         hidden_normed = self.pool_layernorm(hidden)  # (B, L, D)
 
         # Project keys and values in one go, then reshape
-        keys = self.pool_key(hidden_normed).view(batch_size, seq_len, self.num_heads, self.head_dim)
-        values = self.pool_value(hidden_normed).view(batch_size, seq_len, self.num_heads, self.head_dim)
+        keys = self.pool_key(hidden_normed).view(
+            batch_size, seq_len, self.num_heads, self.head_dim)
+        values = self.pool_value(hidden_normed).view(
+            batch_size, seq_len, self.num_heads, self.head_dim)
 
         # Reshape queries
-        queries = queries.view(batch_size, max_segments, self.num_heads, self.head_dim)
+        queries = queries.view(batch_size, max_segments,
+                               self.num_heads, self.head_dim)
 
         # Step 5: Compute attention with fused operations (reduce transposes)
         # queries: (B, S, H, head_dim), keys: (B, L, H, head_dim)
         # Use einsum to avoid multiple transposes
-        attn_scores = torch.einsum('bshd,blhd->bhsl', queries, keys) * self.pool_scale  # (B, H, S, L)
+        attn_scores = torch.einsum(
+            'bshd,blhd->bhsl', queries, keys) * self.pool_scale  # (B, H, S, L)
 
         # Step 6: Mask out positions not in segment
         # segment_mask is (B, L, S), we need (B, 1, S, L) for broadcasting across heads
-        segment_mask_transposed = segment_mask.permute(0, 2, 1).unsqueeze(1)  # (B, 1, S, L)
-        attn_scores = attn_scores.masked_fill(segment_mask_transposed == 0, float('-inf'))
+        segment_mask_transposed = segment_mask.permute(
+            0, 2, 1).unsqueeze(1)  # (B, 1, S, L)
+        attn_scores = attn_scores.masked_fill(
+            segment_mask_transposed == 0, float('-inf'))
 
         # Step 7: Compute attention weights and apply to values
         attn_weights = F.softmax(attn_scores, dim=-1)  # (B, H, S, L)
@@ -227,10 +235,12 @@ class BoundaryPredictor2(nn.Module):
 
         # Apply MLP with residual and project (fused operations)
         q_mlp_out = self.boundary_mlp(q_normed)
-        q_hidden = self.q_proj_layer(F.normalize(q_mlp_out + q_normed, dim=-1, eps=1e-8))
+        q_hidden = self.q_proj_layer(F.normalize(
+            q_mlp_out + q_normed, dim=-1, eps=1e-8))
 
         k_mlp_out = self.boundary_mlp(k_normed)
-        k_hidden = self.k_proj_layer(F.normalize(k_mlp_out + k_normed, dim=-1, eps=1e-8))
+        k_hidden = self.k_proj_layer(F.normalize(
+            k_mlp_out + k_normed, dim=-1, eps=1e-8))
 
         # Compute cosine similarity (already normalized, so this is just dot product)
         cos_sim = torch.einsum("bld,bld->bl", q_hidden, k_hidden)
@@ -245,7 +255,8 @@ class BoundaryPredictor2(nn.Module):
                 print(f"  k_residual has NaN: {torch.isnan(k_residual).any()}")
 
         # Optimized probability computation (fused operations, safe for gradients)
-        probs = torch.clamp((1.0 - (cos_sim + self.similarity_bias)) * 0.5, min=0.0, max=1.0)
+        probs = torch.clamp(
+            (1.0 - (cos_sim + self.similarity_bias)) * 0.5, min=0.0, max=1.0)
         probs = F.pad(probs, (0, 1), value=0.0)
 
         # Debug: Check for NaN in probs
@@ -277,7 +288,9 @@ class BoundaryPredictor2(nn.Module):
         valid_lens = torch.clamp(actual_lens - 1, min=0, max=boundary_seq_len)
 
         # Create position mask
-        pos_idx = torch.arange(boundary_seq_len, device=soft_boundaries.device).unsqueeze(0)  # (1, L)
+        pos_idx = torch.arange(
+            # (1, L)
+            boundary_seq_len, device=soft_boundaries.device).unsqueeze(0)
         valid_mask = (pos_idx < valid_lens.unsqueeze(1)).float()  # (B, L)
 
         # Zero out padding positions
@@ -288,7 +301,8 @@ class BoundaryPredictor2(nn.Module):
         # Only set if valid_len < boundary_seq_len
         needs_boundary_mask = valid_lens < boundary_seq_len
         if needs_boundary_mask.any():
-            batch_idx = torch.arange(batch_size, device=soft_boundaries.device)[needs_boundary_mask]
+            batch_idx = torch.arange(batch_size, device=soft_boundaries.device)[
+                needs_boundary_mask]
             first_padding_idx = valid_lens[needs_boundary_mask]
             soft_boundaries[batch_idx, first_padding_idx] = 1.0
             hard_samples[batch_idx, first_padding_idx] = 1.0
@@ -303,19 +317,23 @@ class BoundaryPredictor2(nn.Module):
 
         # Detect sequences with no boundaries
         sequences_no_boundaries = (hard_boundaries.sum(dim=1) == 0)  # (B,)
-        sequences_with_no_boundaries = sequences_no_boundaries.nonzero(as_tuple=True)[0].tolist()
+        sequences_with_no_boundaries = sequences_no_boundaries.nonzero(as_tuple=True)[
+            0].tolist()
 
         if sequences_no_boundaries.any():
             indices = sequences_no_boundaries.nonzero(as_tuple=True)[0]
-            valid_lens_emergency = torch.clamp(actual_lens[indices] - 1, min=0, max=boundary_seq_len)
-            boundary_idxs = torch.clamp(valid_lens_emergency, min=0, max=boundary_seq_len - 1)
+            valid_lens_emergency = torch.clamp(
+                actual_lens[indices] - 1, min=0, max=boundary_seq_len)
+            boundary_idxs = torch.clamp(
+                valid_lens_emergency, min=0, max=boundary_seq_len - 1)
 
             # Set boundaries for sequences that need them
             valid_boundary_mask = boundary_idxs >= 0
             if valid_boundary_mask.any():
                 valid_seq_indices = indices[valid_boundary_mask]
                 valid_boundary_indices = boundary_idxs[valid_boundary_mask]
-                hard_boundaries[valid_seq_indices, valid_boundary_indices] = 1.0
+                hard_boundaries[valid_seq_indices,
+                                valid_boundary_indices] = 1.0
 
         # Print warning if this happens during training (should be rare)
         if len(sequences_with_no_boundaries) > 0 and self.training:
@@ -388,10 +406,12 @@ class BoundaryPredictor2(nn.Module):
         # Vectorized shortened lengths computation
         # Create valid position mask
         boundary_seq_len = hard_boundaries.shape[1]
-        pos_mask = torch.arange(boundary_seq_len, device=hidden.device).unsqueeze(0) < actual_lens.unsqueeze(1)
+        pos_mask = torch.arange(boundary_seq_len, device=hidden.device).unsqueeze(
+            0) < actual_lens.unsqueeze(1)
 
         # Count boundaries within valid length per sequence
-        num_boundaries_per_sample = (hard_boundaries * pos_mask.float()).sum(dim=1)  # (B,)
+        num_boundaries_per_sample = (
+            hard_boundaries * pos_mask.float()).sum(dim=1)  # (B,)
 
         # Initialize output
         shortened_lengths = torch.zeros(batch_size, device=hidden.device)
@@ -402,8 +422,10 @@ class BoundaryPredictor2(nn.Module):
             shortened_lengths[case1_mask] = 1.0
 
             # Case 2: 0 < num_boundaries < max_segments - 1
-            case2_mask = (num_boundaries_per_sample > 0) & (num_boundaries_per_sample < (max_segments - 1))
-            shortened_lengths[case2_mask] = (num_boundaries_per_sample[case2_mask] + 1) / max_segments
+            case2_mask = (num_boundaries_per_sample > 0) & (
+                num_boundaries_per_sample < (max_segments - 1))
+            shortened_lengths[case2_mask] = (
+                num_boundaries_per_sample[case2_mask] + 1) / max_segments
 
             # Case 3: num_boundaries == 0 -> already 0.0 (default)
 
@@ -458,13 +480,13 @@ class BoundaryPredictor2(nn.Module):
         total_positions_tensor = actual_lens.sum().float()
 
         if self.training:
-            per_sample_loss = 10. * self.calc_loss_target_counts(
+            per_sample_loss = self.calc_loss_target_counts(
                 hard_boundaries,
                 soft_boundaries,
                 lengths,
                 target_boundary_counts,
                 reduce=False,
-            )
+            ) / 10.0
 
             # per_sample_loss = 0.001 * self.calc_ratio_loss(
             #     hard_boundaries,
@@ -496,14 +518,17 @@ class BoundaryPredictor2(nn.Module):
 
             # Vectorize valid length computation and mask creation
             seq_len = hard_samples.shape[1]
-            valid_lengths = torch.clamp((lengths * (seq_len + 1)).long() - 1, max=seq_len)
-            valid_mask = torch.arange(seq_len, device=hard_samples.device).unsqueeze(0) < valid_lengths.unsqueeze(1)
+            valid_lengths = torch.clamp(
+                (lengths * (seq_len + 1)).long() - 1, max=seq_len)
+            valid_mask = torch.arange(seq_len, device=hard_samples.device).unsqueeze(
+                0) < valid_lengths.unsqueeze(1)
             masked_boundaries = hard_samples * valid_mask.float()
 
             # Keep loop for ragged boundary positions (variable length per sample)
             for b in range(batch_size):
                 # Find positions where boundaries occur
-                boundary_positions = masked_boundaries[b].nonzero(as_tuple=True)[0]
+                boundary_positions = masked_boundaries[b].nonzero(as_tuple=True)[
+                    0]
 
                 if len(boundary_positions) > 1:
                     # Calculate spacings between consecutive boundaries
