@@ -398,6 +398,8 @@ class ASR(sb.core.Brain):
             use_bp = self.hparams.use_bp
             if use_bp:
                 total_epochs = self.hparams.number_of_epochs
+                anneal_compression = getattr(self.hparams, "anneal_compression", False)
+
                 if total_epochs > 1:
                     # Keep temperature 1 step behind to prevent it from reaching 0 (which causes NaN)
                     # Clamp epoch to stay 1 step behind, preventing temperature from reaching 0
@@ -405,18 +407,28 @@ class ASR(sb.core.Brain):
                     temperature = 1.0 - (effective_epoch / (total_epochs - 1))
                     # Compression schedule goes 0->1 (opposite of temperature)
                     # 0.0 = 2x compression, 1.0 = target compression
-                    compression_schedule = effective_epoch / (total_epochs - 1)
+                    if anneal_compression:
+                        compression_schedule = effective_epoch / (total_epochs - 1)
+                    else:
+                        compression_schedule = 1.0  # Use target compression directly
                 else:
                     temperature = 1.0
-                    compression_schedule = 0.0
+                    compression_schedule = 1.0 if not anneal_compression else 0.0
+
                 self.modules.BoundaryPredictor.set_temperature(temperature)
                 self.modules.BoundaryPredictor.set_compression_schedule(compression_schedule)
                 scheduled_prior = self.modules.BoundaryPredictor.get_scheduled_prior()
                 scheduled_compression = 1.0 / scheduled_prior
-                logger.info(
-                    f"Epoch {epoch}: BoundaryPredictor temperature = {temperature:.4f}, "
-                    f"compression_schedule = {compression_schedule:.4f}, "
-                    f"scheduled_prior = {scheduled_prior:.4f} ({scheduled_compression:.2f}x)")
+
+                if anneal_compression:
+                    logger.info(
+                        f"Epoch {epoch}: BoundaryPredictor temperature = {temperature:.4f}, "
+                        f"compression_schedule = {compression_schedule:.4f}, "
+                        f"scheduled_prior = {scheduled_prior:.4f} ({scheduled_compression:.2f}x)")
+                else:
+                    logger.info(
+                        f"Epoch {epoch}: BoundaryPredictor temperature = {temperature:.4f}, "
+                        f"compression = {scheduled_compression:.2f}x (annealing disabled)")
 
     def on_stage_end(self, stage, stage_loss, epoch):
         """Gets called at the end of a epoch."""

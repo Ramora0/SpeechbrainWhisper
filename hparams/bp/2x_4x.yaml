@@ -147,6 +147,9 @@ boundary_predictor_temp: 1.0
 boundary_predictor_loss_weight: .01
 boundary_predictor_similarity_bias: -0.7
 
+# Anneal compression from 2x to target over training (linear in compression space)
+anneal_compression: True
+
 # Prior-based boundary targets (not phoneme-based)
 target_phonemes: False
 
