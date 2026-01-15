@@ -178,40 +178,50 @@ class ASR(sb.core.Brain):
                 use_phoneme_targets = getattr(
                     self.hparams, "target_phonemes", False)
 
+                batch_size, seq_len, _ = enc.shape
+                total_positions = (enc_lens * seq_len).float()
+
+                # Get compression schedule from BoundaryPredictor
+                compression_schedule = self.modules.BoundaryPredictor.compression_schedule
+                start_compression = 2.0  # Always start at 2x compression
+
                 if use_phoneme_targets:
                     # Option 1: Phoneme-based targets (variable compression)
                     # Count phonemes from text for dynamic boundary targets
-                    target_boundary_counts = count_phonemes_batch(
+                    final_target_counts = count_phonemes_batch(
                         batch.wrd).to(enc.device)
 
                     # Clamp to valid range based on actual sequence lengths
-                    batch_size, seq_len, _ = enc.shape
-                    max_boundaries = (enc_lens * seq_len).float()
+                    max_boundaries = total_positions
                     min_boundaries = torch.ones_like(max_boundaries)
-                    target_boundary_counts = target_boundary_counts.clamp(
+                    final_target_counts = final_target_counts.clamp(
                         min=min_boundaries, max=max_boundaries)
+
+                    # Apply compression schedule: interpolate in compression space
+                    # from 2x compression to phoneme-based compression
+                    # target_compression = total_positions / final_target_counts
+                    # scheduled_compression = 2 + (target_compression - 2) * schedule
+                    # scheduled_counts = total_positions / scheduled_compression
+                    target_compression = total_positions / final_target_counts.clamp(min=1.0)
+                    scheduled_compression = start_compression + (target_compression - start_compression) * compression_schedule
+                    target_boundary_counts = (total_positions / scheduled_compression).round().clamp(min=1.0)
 
                     if flags.PRINT_DATA:
                         print(
                             f"[Phoneme Targets] text: {batch.wrd[0][:50]}...")
                         print(
-                            f"[Phoneme Targets] target_counts: {target_boundary_counts[:5]}")
+                            f"[Phoneme Targets] final_counts: {final_target_counts[:5]}, scheduled_counts: {target_boundary_counts[:5]}")
                 else:
                     # Option 2: Prior-based targets (fixed compression rate)
-                    # The prior determines the desired boundary probability:
-                    # - prior = 0.5 means 2x compression (1 boundary per 2 positions)
-                    # - prior = 0.25 means 4x compression (1 boundary per 4 positions)
-                    # target_counts = total_positions * prior
-                    prior = self.hparams.boundary_predictor_prior
-                    batch_size, seq_len, _ = enc.shape
-                    # Total positions for each sequence (accounting for variable lengths)
-                    total_positions = (enc_lens * seq_len).float()
-                    # Target boundary counts based on prior
+                    # Use the scheduled prior which interpolates in compression space
+                    # from 2x compression to target compression
+                    scheduled_prior = self.modules.BoundaryPredictor.get_scheduled_prior()
+                    # Target boundary counts based on scheduled prior
                     target_boundary_counts = (
-                        total_positions * prior).round().clamp(min=1.0)
+                        total_positions * scheduled_prior).round().clamp(min=1.0)
 
                     if flags.PRINT_DATA:
-                        print(f"[Prior Targets] prior: {prior}")
+                        print(f"[Prior Targets] scheduled_prior: {scheduled_prior}")
                         print(
                             f"[Prior Targets] total_positions: {total_positions[:5]}")
                         print(
@@ -324,15 +334,18 @@ class ASR(sb.core.Brain):
         if stage == sb.Stage.TRAIN:
             loss_boundary = self.boundary_predictor_loss
             if loss_boundary.item() > 0:
-                target_compression = 1.0 / self.hparams.boundary_predictor_prior
+                # Get scheduled compression from BoundaryPredictor
+                scheduled_prior = self.modules.BoundaryPredictor.get_scheduled_prior()
+                scheduled_compression = 1.0 / scheduled_prior
+                final_compression = 1.0 / self.hparams.boundary_predictor_prior
                 # Calculate actual compression rate
                 if self.num_boundaries > 0:
                     actual_compression = self.total_positions / self.num_boundaries
                     print(
-                        f"Binomial loss: {loss_boundary.item():.6f}, Target compression: {target_compression:.2f}x, Actual compression: {actual_compression:.2f}x")
+                        f"Binomial loss: {loss_boundary.item():.6f}, Scheduled: {scheduled_compression:.2f}x, Final: {final_compression:.2f}x, Actual: {actual_compression:.2f}x")
                 else:
                     print(
-                        f"Binomial loss: {loss_boundary.item():.6f}, Target compression: {target_compression:.2f}x")
+                        f"Binomial loss: {loss_boundary.item():.6f}, Scheduled: {scheduled_compression:.2f}x, Final: {final_compression:.2f}x")
         else:
             loss_boundary = torch.tensor(0.0, device=p_seq.device)
 
@@ -381,20 +394,29 @@ class ASR(sb.core.Brain):
             self.acc_metric = self.hparams.acc_computer()
             self.wer_metric = self.hparams.error_rate_computer()
         else:
-            # Schedule temperature from 1.0 to 0.0 over training (only if BP is used)
+            # Schedule temperature and compression over training (only if BP is used)
             use_bp = self.hparams.use_bp
             if use_bp:
-                # Keep temperature 1 step behind to prevent it from reaching 0 (which causes NaN)
                 total_epochs = self.hparams.number_of_epochs
                 if total_epochs > 1:
+                    # Keep temperature 1 step behind to prevent it from reaching 0 (which causes NaN)
                     # Clamp epoch to stay 1 step behind, preventing temperature from reaching 0
                     effective_epoch = min(epoch, total_epochs - 2)
                     temperature = 1.0 - (effective_epoch / (total_epochs - 1))
+                    # Compression schedule goes 0->1 (opposite of temperature)
+                    # 0.0 = 2x compression, 1.0 = target compression
+                    compression_schedule = effective_epoch / (total_epochs - 1)
                 else:
                     temperature = 1.0
+                    compression_schedule = 0.0
                 self.modules.BoundaryPredictor.set_temperature(temperature)
+                self.modules.BoundaryPredictor.set_compression_schedule(compression_schedule)
+                scheduled_prior = self.modules.BoundaryPredictor.get_scheduled_prior()
+                scheduled_compression = 1.0 / scheduled_prior
                 logger.info(
-                    f"Epoch {epoch}: BoundaryPredictor temperature = {temperature:.4f}")
+                    f"Epoch {epoch}: BoundaryPredictor temperature = {temperature:.4f}, "
+                    f"compression_schedule = {compression_schedule:.4f}, "
+                    f"scheduled_prior = {scheduled_prior:.4f} ({scheduled_compression:.2f}x)")
 
     def on_stage_end(self, stage, stage_loss, epoch):
         """Gets called at the end of a epoch."""

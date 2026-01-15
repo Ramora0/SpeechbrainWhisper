@@ -84,13 +84,31 @@ class BoundaryPredictor2(nn.Module):
         self.compression_schedule = float(schedule_value)
 
     def get_scheduled_prior(self):
+        """
+        Get the prior based on compression schedule.
+
+        Scales linearly in compression space (not prior space):
+        - schedule=0.0: 2x compression (prior=0.5)
+        - schedule=1.0: target compression (prior=target_prior)
+
+        Linear in compression means: 2x -> 4x -> 6x -> 8x
+        Not exponential: 2x -> 4x -> 8x (which you'd get from linear prior)
+        """
         schedule = self.compression_schedule
         target = self.target_prior
 
         if abs(target - 1.0) < 1e-8:
             return 1.0
 
-        scheduled_prior = target / (target + schedule * (1.0 - target))
+        # Convert target prior to compression ratio
+        target_compression = 1.0 / target  # e.g., 8 for prior=0.125
+        start_compression = 2.0  # Start at 2x compression (prior=0.5)
+
+        # Linear interpolation in compression space
+        current_compression = start_compression + (target_compression - start_compression) * schedule
+
+        # Convert back to prior
+        scheduled_prior = 1.0 / current_compression
         return scheduled_prior
 
     def _attention_pooling(self, boundaries, hidden, lengths):
