@@ -37,6 +37,7 @@ import sys
 from pathlib import Path
 
 import torch
+from torch.profiler import profile, ProfilerActivity, schedule
 from hyperpyyaml import load_hyperpyyaml
 
 import speechbrain as sb
@@ -100,7 +101,8 @@ class ASR(sb.core.Brain):
         feats = self.hparams.compute_features(wavs)
         if flags.PRINT_NAN_INF:
             if torch.isnan(feats).any():
-                print(f"[DEBUG] After compute_features: feats has NaN, shape: {feats.shape}")
+                print(
+                    f"[DEBUG] After compute_features: feats has NaN, shape: {feats.shape}")
 
         current_epoch = self.hparams.epoch_counter.current
         feats = self.modules.normalize(feats, wav_lens, epoch=current_epoch)
@@ -138,14 +140,17 @@ class ASR(sb.core.Brain):
 
         if flags.PRINT_NAN_INF:
             if torch.isnan(enc).any() or torch.isinf(enc).any():
-                print(f"[DEBUG] After reshape: enc has NaN: {torch.isnan(enc).any()}, has Inf: {torch.isinf(enc).any()}")
+                print(
+                    f"[DEBUG] After reshape: enc has NaN: {torch.isnan(enc).any()}, has Inf: {torch.isinf(enc).any()}")
                 print(f"[DEBUG] enc stats: min={enc[~torch.isnan(enc) & ~torch.isinf(enc)].min() if (~torch.isnan(enc) & ~torch.isinf(enc)).any() else 'N/A'}, "
                       f"max={enc[~torch.isnan(enc) & ~torch.isinf(enc)].max() if (~torch.isnan(enc) & ~torch.isinf(enc)).any() else 'N/A'}")
-                print(f"[DEBUG] Number of NaN values: {torch.isnan(enc).sum()}, Inf values: {torch.isinf(enc).sum()}")
+                print(
+                    f"[DEBUG] Number of NaN values: {torch.isnan(enc).sum()}, Inf values: {torch.isinf(enc).sum()}")
                 # Check CNN parameters
                 for name, param in self.modules.CNN.named_parameters():
                     if torch.isnan(param).any() or torch.isinf(param).any():
-                        print(f"[DEBUG] CNN parameter {name} has NaN: {torch.isnan(param).any()}, Inf: {torch.isinf(param).any()}")
+                        print(
+                            f"[DEBUG] CNN parameter {name} has NaN: {torch.isnan(param).any()}, Inf: {torch.isinf(param).any()}")
 
         # === BoundaryPredictor Integration ===
         # Initialize BP variables (so code works even if BP block is commented out)
@@ -197,9 +202,13 @@ class ASR(sb.core.Brain):
                     # target_compression = total_positions / final_target_counts
                     # scheduled_compression = 2 + (target_compression - 2) * schedule
                     # scheduled_counts = total_positions / scheduled_compression
-                    target_compression = total_positions / final_target_counts.clamp(min=1.0)
-                    scheduled_compression = start_compression + (target_compression - start_compression) * compression_schedule
-                    target_boundary_counts = (total_positions / scheduled_compression).round().clamp(min=1.0)
+                    target_compression = total_positions / \
+                        final_target_counts.clamp(min=1.0)
+                    scheduled_compression = start_compression + \
+                        (target_compression - start_compression) * \
+                        compression_schedule
+                    target_boundary_counts = (
+                        total_positions / scheduled_compression).round().clamp(min=1.0)
 
                     if flags.PRINT_DATA:
                         print(
@@ -216,7 +225,8 @@ class ASR(sb.core.Brain):
                         total_positions * scheduled_prior).round().clamp(min=1.0)
 
                     if flags.PRINT_DATA:
-                        print(f"[Prior Targets] scheduled_prior: {scheduled_prior}")
+                        print(
+                            f"[Prior Targets] scheduled_prior: {scheduled_prior}")
                         print(
                             f"[Prior Targets] total_positions: {total_positions[:5]}")
                         print(
@@ -393,7 +403,8 @@ class ASR(sb.core.Brain):
             use_bp = self.hparams.use_bp
             if use_bp:
                 total_epochs = self.hparams.number_of_epochs
-                anneal_compression = getattr(self.hparams, "anneal_compression", False)
+                anneal_compression = getattr(
+                    self.hparams, "anneal_compression", False)
 
                 if total_epochs > 1:
                     # Keep temperature 1 step behind to prevent it from reaching 0 (which causes NaN)
@@ -403,7 +414,8 @@ class ASR(sb.core.Brain):
                     # Compression schedule goes 0->1 (opposite of temperature)
                     # 0.0 = 2x compression, 1.0 = target compression
                     if anneal_compression:
-                        compression_schedule = effective_epoch / (total_epochs - 1)
+                        compression_schedule = effective_epoch / \
+                            (total_epochs - 1)
                     else:
                         compression_schedule = 1.0  # Use target compression directly
                 else:
@@ -411,7 +423,8 @@ class ASR(sb.core.Brain):
                     compression_schedule = 1.0 if not anneal_compression else 0.0
 
                 self.modules.BoundaryPredictor.set_temperature(temperature)
-                self.modules.BoundaryPredictor.set_compression_schedule(compression_schedule)
+                self.modules.BoundaryPredictor.set_compression_schedule(
+                    compression_schedule)
                 scheduled_prior = self.modules.BoundaryPredictor.get_scheduled_prior()
                 scheduled_compression = 1.0 / scheduled_prior
 
@@ -512,7 +525,8 @@ class ASR(sb.core.Brain):
                 for name, param in self.modules.named_parameters():
                     if param.grad is not None:
                         if torch.isnan(param.grad).any() or torch.isinf(param.grad).any():
-                            print(f"[DEBUG] Gradient issue in {name}: NaN: {torch.isnan(param.grad).any()}, Inf: {torch.isinf(param.grad).any()}")
+                            print(
+                                f"[DEBUG] Gradient issue in {name}: NaN: {torch.isnan(param.grad).any()}, Inf: {torch.isinf(param.grad).any()}")
                             print(f"[DEBUG] Grad norm: {param.grad.norm()}")
 
             self.hparams.noam_annealing(self.optimizer)
@@ -521,7 +535,8 @@ class ASR(sb.core.Brain):
             if flags.PRINT_NAN_INF:
                 for name, param in self.modules.named_parameters():
                     if torch.isnan(param).any() or torch.isinf(param).any():
-                        print(f"[DEBUG] Parameter corrupted after optimizer step: {name}")
+                        print(
+                            f"[DEBUG] Parameter corrupted after optimizer step: {name}")
 
 
 def dataio_prepare(hparams):
@@ -744,14 +759,72 @@ if __name__ == "__main__":
             valid_dataloader_opts["collate_fn"] = collate_fn
 
     # Training
-    # with torch.autograd.detect_anomaly():
-    asr_brain.fit(
-        asr_brain.hparams.epoch_counter,
-        train_data,
-        valid_data,
-        train_loader_kwargs=train_dataloader_opts,
-        valid_loader_kwargs=valid_dataloader_opts,
-    )
+    # Profiler settings
+    enable_profiler = hparams.get("enable_profiler", True)
+    profiler_wait = hparams.get("profiler_wait", 0)
+    profiler_warmup = hparams.get("profiler_warmup", 10)
+    profiler_active = hparams.get("profiler_active", 10)
+    profiler_repeat = hparams.get("profiler_repeat", 1)
+    profiler_output_dir = hparams.get("profiler_output_dir", "profiler_logs")
+
+    if enable_profiler:
+        os.makedirs(profiler_output_dir, exist_ok=True)
+        logger.info(f"Profiler enabled. Output dir: {profiler_output_dir}")
+        logger.info(
+            f"Profiler schedule: wait={profiler_wait}, warmup={profiler_warmup}, "
+            f"active={profiler_active}, repeat={profiler_repeat}")
+
+        def trace_handler(prof):
+            import socket
+            worker_name = socket.gethostname()
+            trace_path = os.path.join(
+                profiler_output_dir,
+                f"{worker_name}.{os.getpid()}.{prof.step_num}.pt.trace.json"
+            )
+            prof.export_chrome_trace(trace_path)
+            logger.info(f"Exported trace to {trace_path}")
+
+        prof = profile(
+            activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA],
+            schedule=schedule(
+                wait=profiler_wait,
+                warmup=profiler_warmup,
+                active=profiler_active,
+                repeat=profiler_repeat
+            ),
+            on_trace_ready=trace_handler,
+            record_shapes=True,
+            profile_memory=True,
+            with_stack=True
+        )
+        prof.start()
+
+        original_on_fit_batch_end = asr_brain.on_fit_batch_end
+
+        def profiled_on_fit_batch_end(batch, outputs, loss, should_step):
+            original_on_fit_batch_end(batch, outputs, loss, should_step)
+            prof.step()
+
+        asr_brain.on_fit_batch_end = profiled_on_fit_batch_end
+
+        try:
+            asr_brain.fit(
+                asr_brain.hparams.epoch_counter,
+                train_data,
+                valid_data,
+                train_loader_kwargs=train_dataloader_opts,
+                valid_loader_kwargs=valid_dataloader_opts,
+            )
+        finally:
+            prof.stop()
+    else:
+        asr_brain.fit(
+            asr_brain.hparams.epoch_counter,
+            train_data,
+            valid_data,
+            train_loader_kwargs=train_dataloader_opts,
+            valid_loader_kwargs=valid_dataloader_opts,
+        )
 
     # Testing
     if not os.path.exists(hparams["output_wer_folder"]):
