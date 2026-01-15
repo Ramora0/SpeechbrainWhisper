@@ -144,7 +144,7 @@ lm_weight: 0.60
 # BP prior = 1/4 = 0.25
 boundary_predictor_prior: 0.25
 boundary_predictor_temp: 1.0
-boundary_predictor_loss_weight: 1.0
+boundary_predictor_loss_weight: .01
 boundary_predictor_similarity_bias: -0.25
 
 # Prior-based boundary targets (not phoneme-based)

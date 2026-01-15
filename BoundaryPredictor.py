@@ -486,7 +486,7 @@ class BoundaryPredictor2(nn.Module):
                 lengths,
                 target_boundary_counts,
                 reduce=False,
-            ) / 10.0
+            )
 
             # per_sample_loss = 0.001 * self.calc_ratio_loss(
             #     hard_boundaries,
