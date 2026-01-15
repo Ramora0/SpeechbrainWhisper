@@ -142,10 +142,9 @@ class BoundaryPredictor2(nn.Module):
         # Compute actual lengths for each batch item
         actual_lens = (lengths * seq_len).long()
 
-        # Create length mask for segment_mask
-        length_mask = torch.zeros(batch_size, seq_len, device=device)
-        for i in range(batch_size):
-            length_mask[i, :actual_lens[i]] = 1.0
+        # Create length mask for segment_mask (vectorized)
+        pos_indices = torch.arange(seq_len, device=device).unsqueeze(0)  # (1, L)
+        length_mask = (pos_indices < actual_lens.unsqueeze(1)).float()  # (B, L)
 
         # Apply length mask to segment_mask
         segment_mask = segment_mask * length_mask.unsqueeze(-1)
@@ -272,40 +271,54 @@ class BoundaryPredictor2(nn.Module):
             soft_boundaries = probs
             hard_samples = (probs > 0.5).float()
 
-        # Mask boundaries based on lengths
+        # Mask boundaries based on lengths (vectorized)
         batch_size, boundary_seq_len = soft_boundaries.shape
         # +1 because boundaries are seq_len-1
         actual_lens = (lengths * (boundary_seq_len + 1)).long()
 
-        # Create mask and apply
-        for i in range(batch_size):
-            valid_len = min(actual_lens[i].item() - 1, boundary_seq_len)
-            if valid_len < boundary_seq_len:
-                # Zero out padding positions
-                soft_boundaries[i, valid_len:] = 0.0
-                hard_samples[i, valid_len:] = 0.0
-                # Set first padding position as boundary
-                if valid_len >= 0 and valid_len < boundary_seq_len:
-                    soft_boundaries[i, valid_len] = 1.0
-                    hard_samples[i, valid_len] = 1.0
+        # Compute valid lengths and clamp
+        valid_lens = torch.clamp(actual_lens - 1, min=0, max=boundary_seq_len)
+
+        # Create position mask
+        pos_idx = torch.arange(boundary_seq_len, device=soft_boundaries.device).unsqueeze(0)  # (1, L)
+        valid_mask = (pos_idx < valid_lens.unsqueeze(1)).float()  # (B, L)
+
+        # Zero out padding positions
+        soft_boundaries = soft_boundaries * valid_mask
+        hard_samples = hard_samples * valid_mask
+
+        # Set boundary at first padding position using advanced indexing
+        # Only set if valid_len < boundary_seq_len
+        needs_boundary_mask = valid_lens < boundary_seq_len
+        if needs_boundary_mask.any():
+            batch_idx = torch.arange(batch_size, device=soft_boundaries.device)[needs_boundary_mask]
+            first_padding_idx = valid_lens[needs_boundary_mask]
+            soft_boundaries[batch_idx, first_padding_idx] = 1.0
+            hard_samples[batch_idx, first_padding_idx] = 1.0
 
         hard_boundaries = (
             hard_samples - soft_boundaries.detach() + soft_boundaries
         )
 
-        # Ensure each sequence has at least one boundary to prevent empty segments
+        # Ensure each sequence has at least one boundary to prevent empty segments (vectorized)
         # This is a safeguard that should rarely trigger
         boundary_seq_len = hard_boundaries.shape[1]
-        sequences_with_no_boundaries = []
-        for i in range(batch_size):
-            # Check if this sequence has any boundaries
-            if hard_boundaries[i].sum() == 0:
-                sequences_with_no_boundaries.append(i)
-                # Add boundary at the last valid position (ensure within bounds)
-                valid_len = min(actual_lens[i].item() - 1, boundary_seq_len)
-                boundary_idx = min(valid_len, boundary_seq_len - 1)
-                if boundary_idx >= 0:
-                    hard_boundaries[i, boundary_idx] = 1.0
+
+        # Detect sequences with no boundaries
+        sequences_no_boundaries = (hard_boundaries.sum(dim=1) == 0)  # (B,)
+        sequences_with_no_boundaries = sequences_no_boundaries.nonzero(as_tuple=True)[0].tolist()
+
+        if sequences_no_boundaries.any():
+            indices = sequences_no_boundaries.nonzero(as_tuple=True)[0]
+            valid_lens_emergency = torch.clamp(actual_lens[indices] - 1, min=0, max=boundary_seq_len)
+            boundary_idxs = torch.clamp(valid_lens_emergency, min=0, max=boundary_seq_len - 1)
+
+            # Set boundaries for sequences that need them
+            valid_boundary_mask = boundary_idxs >= 0
+            if valid_boundary_mask.any():
+                valid_seq_indices = indices[valid_boundary_mask]
+                valid_boundary_indices = boundary_idxs[valid_boundary_mask]
+                hard_boundaries[valid_seq_indices, valid_boundary_indices] = 1.0
 
         # Print warning if this happens during training (should be rare)
         if len(sequences_with_no_boundaries) > 0 and self.training:
@@ -375,28 +388,27 @@ class BoundaryPredictor2(nn.Module):
         if flags.PRINT_DATA:
             print(f"  max_segments (from pooled) = {max_segments}")
 
+        # Vectorized shortened lengths computation
+        # Create valid position mask
+        boundary_seq_len = hard_boundaries.shape[1]
+        pos_mask = torch.arange(boundary_seq_len, device=hidden.device).unsqueeze(0) < actual_lens.unsqueeze(1)
+
+        # Count boundaries within valid length per sequence
+        num_boundaries_per_sample = (hard_boundaries * pos_mask.float()).sum(dim=1)  # (B,)
+
+        # Initialize output
         shortened_lengths = torch.zeros(batch_size, device=hidden.device)
-        for b in range(batch_size):
-            # Count boundaries within valid length
-            valid_len = actual_lens[b].item()
-            num_boundaries = hard_boundaries[b, :valid_len].sum().item()
-            # N boundaries create N+1 segments (including the final segment)
-            # But since the pooling already accounts for this, we just need to count
-            # how many pooled segments are valid for this sample
-            if num_boundaries > 0 and max_segments > 0:
-                # The number of segments is num_boundaries (since each boundary ends a segment)
-                # But we need to check if this sample uses all max_segments positions
-                # by comparing against max_segments - 1 (since max boundaries = max_segments - 1)
-                # Actually, if we have max_segments positions in output, and num_boundaries boundaries,
-                # we need to map this correctly
-                num_segments = min(num_boundaries, max_segments)
-                # Ensure at least one sample reaches 1.0 if it has the maximum boundaries
-                if num_boundaries >= max_segments - 1:
-                    shortened_lengths[b] = 1.0
-                else:
-                    shortened_lengths[b] = (num_boundaries + 1) / max_segments
-            else:
-                shortened_lengths[b] = 0.0
+
+        if max_segments > 0:
+            # Case 1: num_boundaries >= max_segments - 1
+            case1_mask = num_boundaries_per_sample >= (max_segments - 1)
+            shortened_lengths[case1_mask] = 1.0
+
+            # Case 2: 0 < num_boundaries < max_segments - 1
+            case2_mask = (num_boundaries_per_sample > 0) & (num_boundaries_per_sample < (max_segments - 1))
+            shortened_lengths[case2_mask] = (num_boundaries_per_sample[case2_mask] + 1) / max_segments
+
+            # Case 3: num_boundaries == 0 -> already 0.0 (default)
 
         if flags.PRINT_DATA:
             print(
@@ -485,16 +497,16 @@ class BoundaryPredictor2(nn.Module):
             adjacent_count = 0
             total_boundaries = 0
 
-            for b in range(batch_size):
-                # Get boundary positions for this sample
-                seq_len = hard_samples.shape[1]
-                # +1 because hard_samples is seq_len-1
-                actual_len = (lengths[b] * (seq_len + 1)).long().item()
-                valid_length = min(actual_len - 1, seq_len)
-                boundaries_b = hard_samples[b, :valid_length]
+            # Vectorize valid length computation and mask creation
+            seq_len = hard_samples.shape[1]
+            valid_lengths = torch.clamp((lengths * (seq_len + 1)).long() - 1, max=seq_len)
+            valid_mask = torch.arange(seq_len, device=hard_samples.device).unsqueeze(0) < valid_lengths.unsqueeze(1)
+            masked_boundaries = hard_samples * valid_mask.float()
 
+            # Keep loop for ragged boundary positions (variable length per sample)
+            for b in range(batch_size):
                 # Find positions where boundaries occur
-                boundary_positions = boundaries_b.nonzero(as_tuple=True)[0]
+                boundary_positions = masked_boundaries[b].nonzero(as_tuple=True)[0]
 
                 if len(boundary_positions) > 1:
                     # Calculate spacings between consecutive boundaries

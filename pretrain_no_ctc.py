@@ -324,13 +324,15 @@ class ASR(sb.core.Brain):
         if stage == sb.Stage.TRAIN:
             loss_boundary = self.boundary_predictor_loss
             if loss_boundary.item() > 0:
-                # Calculate compression rate
+                target_compression = 1.0 / self.hparams.boundary_predictor_prior
+                # Calculate actual compression rate
                 if self.num_boundaries > 0:
-                    compression_rate = self.total_positions / self.num_boundaries
+                    actual_compression = self.total_positions / self.num_boundaries
                     print(
-                        f"Binomial loss: {loss_boundary.item():.6f}, Compression rate: {compression_rate:.2f}x")
+                        f"Binomial loss: {loss_boundary.item():.6f}, Target compression: {target_compression:.2f}x, Actual compression: {actual_compression:.2f}x")
                 else:
-                    print(f"Binomial loss: {loss_boundary.item():.6f}")
+                    print(
+                        f"Binomial loss: {loss_boundary.item():.6f}, Target compression: {target_compression:.2f}x")
         else:
             loss_boundary = torch.tensor(0.0, device=p_seq.device)
 
@@ -715,14 +717,14 @@ if __name__ == "__main__":
             valid_dataloader_opts["collate_fn"] = collate_fn
 
     # Training
-    with torch.autograd.detect_anomaly():
-        asr_brain.fit(
-            asr_brain.hparams.epoch_counter,
-            train_data,
-            valid_data,
-            train_loader_kwargs=train_dataloader_opts,
-            valid_loader_kwargs=valid_dataloader_opts,
-        )
+    # with torch.autograd.detect_anomaly():
+    asr_brain.fit(
+        asr_brain.hparams.epoch_counter,
+        train_data,
+        valid_data,
+        train_loader_kwargs=train_dataloader_opts,
+        valid_loader_kwargs=valid_dataloader_opts,
+    )
 
     # Testing
     if not os.path.exists(hparams["output_wer_folder"]):
