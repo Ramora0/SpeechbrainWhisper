@@ -146,7 +146,7 @@ lm_weight: 0.60
 boundary_predictor_prior: 0.192
 boundary_predictor_temp: 1.0
 boundary_predictor_loss_weight: 1.0
-boundary_predictor_similarity_bias: -0.1
+boundary_predictor_similarity_bias: -0.0
 
 # Prior-based boundary targets (not phoneme-based)
 target_phonemes: False
