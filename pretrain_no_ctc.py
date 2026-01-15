@@ -99,14 +99,14 @@ class ASR(sb.core.Brain):
         # compute features
         feats = self.hparams.compute_features(wavs)
         if flags.PRINT_NAN_INF:
-            print(
-                f"[DEBUG] After compute_features: feats has NaN: {torch.isnan(feats).any()}, shape: {feats.shape}")
+            if torch.isnan(feats).any():
+                print(f"[DEBUG] After compute_features: feats has NaN, shape: {feats.shape}")
 
         current_epoch = self.hparams.epoch_counter.current
         feats = self.modules.normalize(feats, wav_lens, epoch=current_epoch)
         if flags.PRINT_NAN_INF:
-            print(
-                f"[DEBUG] After normalize: feats has NaN: {torch.isnan(feats).any()}")
+            if torch.isnan(feats).any():
+                print(f"[DEBUG] After normalize: feats has NaN")
 
         # Add feature augmentation if specified.
         augment_warmup = 0
@@ -119,16 +119,16 @@ class ASR(sb.core.Brain):
                     tokens_bos
                 )
                 if flags.PRINT_NAN_INF:
-                    print(
-                        f"[DEBUG] After fea_augment: feats has NaN: {torch.isnan(feats).any()}")
+                    if torch.isnan(feats).any():
+                        print(f"[DEBUG] After fea_augment: feats has NaN")
 
         # forward modules
         enc = self.modules.CNN(feats)
         enc_lens = wav_lens
 
         if flags.PRINT_NAN_INF:
-            print(
-                f"[DEBUG] After CNN: enc has NaN: {torch.isnan(enc).any()}, shape: {enc.shape}")
+            if torch.isnan(enc).any():
+                print(f"[DEBUG] After CNN: enc has NaN, shape: {enc.shape}")
 
         # Reshape CNN output from 4D to 3D (same logic as TransformerASR.encode)
         # CNN outputs (batch, time, ch1, ch2) and we reshape to (batch, time, ch1*ch2)
@@ -137,20 +137,15 @@ class ASR(sb.core.Brain):
             enc = enc.reshape(bz, t, ch1 * ch2)
 
         if flags.PRINT_NAN_INF:
-            print(
-                f"[DEBUG] After reshape: enc has NaN: {torch.isnan(enc).any()}, has Inf: {torch.isinf(enc).any()}")
-        if torch.isnan(enc).any() or torch.isinf(enc).any():
-            if flags.PRINT_NAN_INF:
+            if torch.isnan(enc).any() or torch.isinf(enc).any():
+                print(f"[DEBUG] After reshape: enc has NaN: {torch.isnan(enc).any()}, has Inf: {torch.isinf(enc).any()}")
                 print(f"[DEBUG] enc stats: min={enc[~torch.isnan(enc) & ~torch.isinf(enc)].min() if (~torch.isnan(enc) & ~torch.isinf(enc)).any() else 'N/A'}, "
                       f"max={enc[~torch.isnan(enc) & ~torch.isinf(enc)].max() if (~torch.isnan(enc) & ~torch.isinf(enc)).any() else 'N/A'}")
-                print(
-                    f"[DEBUG] Number of NaN values: {torch.isnan(enc).sum()}, Inf values: {torch.isinf(enc).sum()}")
-            # Check CNN parameters
-            for name, param in self.modules.CNN.named_parameters():
-                if torch.isnan(param).any() or torch.isinf(param).any():
-                    if flags.PRINT_NAN_INF:
-                        print(
-                            f"[DEBUG] CNN parameter {name} has NaN: {torch.isnan(param).any()}, Inf: {torch.isinf(param).any()}")
+                print(f"[DEBUG] Number of NaN values: {torch.isnan(enc).sum()}, Inf values: {torch.isinf(enc).sum()}")
+                # Check CNN parameters
+                for name, param in self.modules.CNN.named_parameters():
+                    if torch.isnan(param).any() or torch.isinf(param).any():
+                        print(f"[DEBUG] CNN parameter {name} has NaN: {torch.isnan(param).any()}, Inf: {torch.isinf(param).any()}")
 
         # === BoundaryPredictor Integration ===
         # Initialize BP variables (so code works even if BP block is commented out)
@@ -512,23 +507,21 @@ class ASR(sb.core.Brain):
     def on_fit_batch_end(self, batch, outputs, loss, should_step):
         """At the end of the optimizer step, apply noam annealing."""
         if should_step:
-            # Check for NaN/Inf in gradients before optimizer step
-            for name, param in self.modules.named_parameters():
-                if param.grad is not None:
-                    if torch.isnan(param.grad).any() or torch.isinf(param.grad).any():
-                        if flags.PRINT_NAN_INF:
-                            print(
-                                f"[DEBUG] Gradient issue in {name}: NaN: {torch.isnan(param.grad).any()}, Inf: {torch.isinf(param.grad).any()}")
+            # Check for NaN/Inf in gradients before optimizer step (only when flag enabled)
+            if flags.PRINT_NAN_INF:
+                for name, param in self.modules.named_parameters():
+                    if param.grad is not None:
+                        if torch.isnan(param.grad).any() or torch.isinf(param.grad).any():
+                            print(f"[DEBUG] Gradient issue in {name}: NaN: {torch.isnan(param.grad).any()}, Inf: {torch.isinf(param.grad).any()}")
                             print(f"[DEBUG] Grad norm: {param.grad.norm()}")
 
-            # Check for NaN/Inf in parameters after optimizer step
             self.hparams.noam_annealing(self.optimizer)
 
-            for name, param in self.modules.named_parameters():
-                if torch.isnan(param).any() or torch.isinf(param).any():
-                    if flags.PRINT_NAN_INF:
-                        print(
-                            f"[DEBUG] Parameter corrupted after optimizer step: {name}")
+            # Check for NaN/Inf in parameters after optimizer step (only when flag enabled)
+            if flags.PRINT_NAN_INF:
+                for name, param in self.modules.named_parameters():
+                    if torch.isnan(param).any() or torch.isinf(param).any():
+                        print(f"[DEBUG] Parameter corrupted after optimizer step: {name}")
 
 
 def dataio_prepare(hparams):

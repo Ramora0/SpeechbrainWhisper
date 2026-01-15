@@ -263,23 +263,21 @@ class BoundaryPredictor2(nn.Module):
         # Compute cosine similarity (already normalized, so this is just dot product)
         cos_sim = torch.einsum("bld,bld->bl", q_hidden, k_hidden)
 
-        # Debug: Check for NaN values
-        if torch.isnan(cos_sim).any():
-            if flags.PRINT_NAN_INF:
+        # Debug: Check for NaN values (only when flag enabled to avoid GPU sync)
+        if flags.PRINT_NAN_INF:
+            if torch.isnan(cos_sim).any():
                 print(f"[BoundaryPredictor.py] WARNING: NaN detected in cos_sim")
                 print(f"  q_hidden has NaN: {torch.isnan(q_hidden).any()}")
                 print(f"  k_hidden has NaN: {torch.isnan(k_hidden).any()}")
-                print(f"  q_residual has NaN: {torch.isnan(q_residual).any()}")
-                print(f"  k_residual has NaN: {torch.isnan(k_residual).any()}")
 
         # Optimized probability computation (fused operations, safe for gradients)
         probs = torch.clamp(
             (1.0 - (cos_sim + self.similarity_bias)) * 0.5, min=0.0, max=1.0)
         probs = F.pad(probs, (0, 1), value=0.0)
 
-        # Debug: Check for NaN in probs
-        if torch.isnan(probs).any():
-            if flags.PRINT_NAN_INF:
+        # Debug: Check for NaN in probs (only when flag enabled to avoid GPU sync)
+        if flags.PRINT_NAN_INF:
+            if torch.isnan(probs).any():
                 print(f"[BoundaryPredictor.py] ERROR: NaN detected in probs!")
                 print(f"  probs shape: {probs.shape}")
                 print(f"  Number of NaN values: {torch.isnan(probs).sum()}")
