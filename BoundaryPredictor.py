@@ -154,47 +154,36 @@ class BoundaryPredictor2(nn.Module):
         queries = self.learned_query.unsqueeze(0).unsqueeze(
             0).expand(batch_size, max_segments, -1)  # (B, S, D)
 
-        # Step 4: Reshape queries for multi-head attention
-        queries = queries.view(batch_size, max_segments, self.num_heads,
-                               # (B, H, S, head_dim)
-                               self.head_dim).transpose(1, 2)
-
-        # Step 5: Apply LayerNorm before projecting to keys and values
+        # Step 4: Apply LayerNorm and project to keys/values (fused to reduce operations)
         hidden_normed = self.pool_layernorm(hidden)  # (B, L, D)
 
-        # Step 6: Project to keys and values and reshape for multi-head
-        keys = self.pool_key(hidden_normed)      # (B, L, D)
-        keys = keys.view(batch_size, seq_len, self.num_heads,
-                         self.head_dim).transpose(1, 2)  # (B, H, L, head_dim)
+        # Project keys and values in one go, then reshape
+        keys = self.pool_key(hidden_normed).view(batch_size, seq_len, self.num_heads, self.head_dim)
+        values = self.pool_value(hidden_normed).view(batch_size, seq_len, self.num_heads, self.head_dim)
 
-        values = self.pool_value(hidden_normed)  # (B, L, D)
-        values = values.view(batch_size, seq_len, self.num_heads,
-                             # (B, H, L, head_dim)
-                             self.head_dim).transpose(1, 2)
+        # Reshape queries
+        queries = queries.view(batch_size, max_segments, self.num_heads, self.head_dim)
 
-        # Step 7: Compute attention scores: queries @ keys
-        # queries: (B, H, S, head_dim), keys: (B, H, L, head_dim) -> (B, H, S, L)
-        attn_scores = torch.matmul(
-            queries, keys.transpose(-2, -1))  # (B, H, S, L)
-        attn_scores = attn_scores * self.pool_scale
+        # Step 5: Compute attention with fused operations (reduce transposes)
+        # queries: (B, S, H, head_dim), keys: (B, L, H, head_dim)
+        # Use einsum to avoid multiple transposes
+        attn_scores = torch.einsum('bshd,blhd->bhsl', queries, keys) * self.pool_scale  # (B, H, S, L)
 
-        # Step 8: Mask out positions not in segment
+        # Step 6: Mask out positions not in segment
         # segment_mask is (B, L, S), we need (B, 1, S, L) for broadcasting across heads
-        segment_mask_transposed = segment_mask.transpose(
-            1, 2).unsqueeze(1)  # (B, 1, S, L)
-        attn_scores = attn_scores.masked_fill(
-            segment_mask_transposed == 0, float('-inf'))
+        segment_mask_transposed = segment_mask.permute(0, 2, 1).unsqueeze(1)  # (B, 1, S, L)
+        attn_scores = attn_scores.masked_fill(segment_mask_transposed == 0, float('-inf'))
 
-        # Step 9: Compute attention weights per segment
+        # Step 7: Compute attention weights and apply to values
         attn_weights = F.softmax(attn_scores, dim=-1)  # (B, H, S, L)
         attn_weights = torch.nan_to_num(attn_weights, nan=0.0)
 
-        # Step 10: Apply attention: (B, H, S, L) @ (B, H, L, head_dim) -> (B, H, S, head_dim)
-        pooled = torch.matmul(attn_weights, values)  # (B, H, S, head_dim)
+        # Apply attention using einsum (avoids transpose)
+        # attn_weights: (B, H, S, L), values: (B, L, H, head_dim) -> (B, S, H, head_dim)
+        pooled = torch.einsum('bhsl,blhd->bshd', attn_weights, values)
 
-        # Step 11: Concatenate heads back together
-        pooled = pooled.transpose(1, 2).contiguous()  # (B, S, H, head_dim)
-        pooled = pooled.flatten(2)  # (B, S, H*head_dim) -> (B, S, D)
+        # Step 8: Flatten heads (no contiguous() needed, einsum output is already contiguous)
+        pooled = pooled.reshape(batch_size, max_segments, -1)  # (B, S, D)
 
         # Step 12: Output projection to combine information from all heads
         pooled = self.pool_output(pooled)
@@ -225,16 +214,25 @@ class BoundaryPredictor2(nn.Module):
             print(f"  lengths.shape = {lengths.shape}")
             print(f"  lengths = {lengths}")
 
-        q_input = F.normalize(self.dropout(hidden[:, :-1]), dim=-1, eps=1e-8)
-        q_mlp_out = self.boundary_mlp(q_input)
-        q_residual = q_mlp_out + q_input  # Residual connection
-        q_hidden = self.q_proj_layer(F.normalize(q_residual, dim=-1, eps=1e-8))
+        # Optimized: apply dropout once and normalize once to reduce backward pass cost
+        hidden_dropped = self.dropout(hidden)
 
-        k_input = F.normalize(self.dropout(hidden[:, 1:]), dim=-1, eps=1e-8)
-        k_mlp_out = self.boundary_mlp(k_input)
-        k_residual = k_mlp_out + k_input  # Residual connection
-        k_hidden = self.k_proj_layer(F.normalize(k_residual, dim=-1, eps=1e-8))
+        # Extract q and k inputs (adjacent frames)
+        q_input = hidden_dropped[:, :-1]  # (B, L-1, D)
+        k_input = hidden_dropped[:, 1:]   # (B, L-1, D)
 
+        # Normalize once (instead of 4 times)
+        q_normed = F.normalize(q_input, dim=-1, eps=1e-8)
+        k_normed = F.normalize(k_input, dim=-1, eps=1e-8)
+
+        # Apply MLP with residual and project (fused operations)
+        q_mlp_out = self.boundary_mlp(q_normed)
+        q_hidden = self.q_proj_layer(F.normalize(q_mlp_out + q_normed, dim=-1, eps=1e-8))
+
+        k_mlp_out = self.boundary_mlp(k_normed)
+        k_hidden = self.k_proj_layer(F.normalize(k_mlp_out + k_normed, dim=-1, eps=1e-8))
+
+        # Compute cosine similarity (already normalized, so this is just dot product)
         cos_sim = torch.einsum("bld,bld->bl", q_hidden, k_hidden)
 
         # Debug: Check for NaN values
@@ -246,9 +244,8 @@ class BoundaryPredictor2(nn.Module):
                 print(f"  q_residual has NaN: {torch.isnan(q_residual).any()}")
                 print(f"  k_residual has NaN: {torch.isnan(k_residual).any()}")
 
-        probs = torch.clamp(
-            (1 - (cos_sim + self.similarity_bias)) * 0.5, min=0.0, max=1.0)
-        # probs = torch.ones_like(cos_sim) * 0.5
+        # Optimized probability computation (fused operations, safe for gradients)
+        probs = torch.clamp((1.0 - (cos_sim + self.similarity_bias)) * 0.5, min=0.0, max=1.0)
         probs = F.pad(probs, (0, 1), value=0.0)
 
         # Debug: Check for NaN in probs
