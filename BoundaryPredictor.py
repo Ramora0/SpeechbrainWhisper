@@ -511,52 +511,55 @@ class BoundaryPredictor2(nn.Module):
         boundary_cv = None
         boundary_adjacent_pct = None
 
-        with torch.no_grad():
-            all_spacings = []
-            adjacent_count = 0
-            total_boundaries = 0
+        # Only compute expensive boundary statistics during evaluation (avoids GPU-CPU sync during training)
+        if not self.training:
+            with torch.no_grad():
+                all_spacings = []
+                adjacent_count = 0
+                total_boundaries = 0
 
-            # Vectorize valid length computation and mask creation
-            seq_len = hard_samples.shape[1]
-            valid_lengths = torch.clamp(
-                (lengths * (seq_len + 1)).long() - 1, max=seq_len)
-            valid_mask = torch.arange(seq_len, device=hard_samples.device).unsqueeze(
-                0) < valid_lengths.unsqueeze(1)
-            masked_boundaries = hard_samples * valid_mask.float()
+                # Vectorize valid length computation and mask creation
+                seq_len = hard_samples.shape[1]
+                valid_lengths = torch.clamp(
+                    (lengths * (seq_len + 1)).long() - 1, max=seq_len)
+                valid_mask = torch.arange(seq_len, device=hard_samples.device).unsqueeze(
+                    0) < valid_lengths.unsqueeze(1)
+                masked_boundaries = hard_samples * valid_mask.float()
 
-            # Keep loop for ragged boundary positions (variable length per sample)
-            for b in range(batch_size):
-                # Find positions where boundaries occur
-                boundary_positions = masked_boundaries[b].nonzero(as_tuple=True)[
-                    0]
+                # Keep loop for ragged boundary positions (variable length per sample)
+                for b in range(batch_size):
+                    # Find positions where boundaries occur
+                    boundary_positions = masked_boundaries[b].nonzero(as_tuple=True)[
+                        0]
 
-                if len(boundary_positions) > 1:
-                    # Calculate spacings between consecutive boundaries
-                    spacings = boundary_positions[1:] - boundary_positions[:-1]
-                    all_spacings.extend(spacings.cpu().tolist())
+                    if len(boundary_positions) > 1:
+                        # Calculate spacings between consecutive boundaries
+                        spacings = boundary_positions[1:] - \
+                            boundary_positions[:-1]
+                        all_spacings.extend(spacings.cpu().tolist())
 
-                    # Count adjacent boundaries (spacing == 1)
-                    adjacent_count += (spacings == 1).sum().item()
-                    # Number of gaps between boundaries
-                    total_boundaries += len(boundary_positions) - 1
+                        # Count adjacent boundaries (spacing == 1)
+                        adjacent_count += (spacings == 1).sum().item()
+                        # Number of gaps between boundaries
+                        total_boundaries += len(boundary_positions) - 1
 
-            # Calculate coefficient of variation (CV = std / mean)
-            if len(all_spacings) > 0:
-                spacings_tensor = torch.tensor(
-                    all_spacings, dtype=torch.float32)
-                mean_spacing = spacings_tensor.mean()
-                std_spacing = spacings_tensor.std()
-                if mean_spacing > 0:
-                    boundary_cv = (std_spacing / mean_spacing).item()
+                # Calculate coefficient of variation (CV = std / mean)
+                if len(all_spacings) > 0:
+                    spacings_tensor = torch.tensor(
+                        all_spacings, dtype=torch.float32)
+                    mean_spacing = spacings_tensor.mean()
+                    std_spacing = spacings_tensor.std()
+                    if mean_spacing > 0:
+                        boundary_cv = (std_spacing / mean_spacing).item()
+                    else:
+                        boundary_cv = 0.0
+
+                # Calculate adjacent percentage
+                if total_boundaries > 0:
+                    boundary_adjacent_pct = (
+                        adjacent_count / total_boundaries) * 100.0
                 else:
-                    boundary_cv = 0.0
-
-            # Calculate adjacent percentage
-            if total_boundaries > 0:
-                boundary_adjacent_pct = (
-                    adjacent_count / total_boundaries) * 100.0
-            else:
-                boundary_adjacent_pct = 0.0
+                    boundary_adjacent_pct = 0.0
 
         if flags.PRINT_FLOW:
             print(f"[BoundaryPredictor.py] RETURN:")
