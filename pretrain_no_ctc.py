@@ -192,7 +192,8 @@ class ASR(sb.core.Brain):
                         min=min_boundaries, max=max_boundaries)
 
                     if flags.PRINT_DATA:
-                        print(f"[Phoneme Targets] text: {batch.wrd[0][:50]}...")
+                        print(
+                            f"[Phoneme Targets] text: {batch.wrd[0][:50]}...")
                         print(
                             f"[Phoneme Targets] target_counts: {target_boundary_counts[:5]}")
                 else:
@@ -326,7 +327,8 @@ class ASR(sb.core.Brain):
                 # Calculate compression rate
                 if self.num_boundaries > 0:
                     compression_rate = self.total_positions / self.num_boundaries
-                    print(f"Binomial loss: {loss_boundary.item():.6f}, Compression rate: {compression_rate:.2f}x")
+                    print(
+                        f"Binomial loss: {loss_boundary.item():.6f}, Compression rate: {compression_rate:.2f}x")
                 else:
                     print(f"Binomial loss: {loss_boundary.item():.6f}")
         else:
@@ -334,7 +336,8 @@ class ASR(sb.core.Brain):
 
         # Combine losses (seq2seq only, no CTC)
         # Only add boundary loss if use_bp is enabled
-        boundary_loss_weight = getattr(self.hparams, "boundary_predictor_loss_weight", 0.0)
+        boundary_loss_weight = getattr(
+            self.hparams, "boundary_predictor_loss_weight", 0.0)
         loss = loss_seq + boundary_loss_weight * loss_boundary
 
         if stage != sb.Stage.TRAIN:
@@ -712,13 +715,14 @@ if __name__ == "__main__":
             valid_dataloader_opts["collate_fn"] = collate_fn
 
     # Training
-    asr_brain.fit(
-        asr_brain.hparams.epoch_counter,
-        train_data,
-        valid_data,
-        train_loader_kwargs=train_dataloader_opts,
-        valid_loader_kwargs=valid_dataloader_opts,
-    )
+    with torch.autograd.detect_anomaly():
+        asr_brain.fit(
+            asr_brain.hparams.epoch_counter,
+            train_data,
+            valid_data,
+            train_loader_kwargs=train_dataloader_opts,
+            valid_loader_kwargs=valid_dataloader_opts,
+        )
 
     # Testing
     if not os.path.exists(hparams["output_wer_folder"]):
