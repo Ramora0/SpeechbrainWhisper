@@ -1,11 +1,12 @@
 #!/bin/bash
 #SBATCH --job-name=train_bp
+#SBATCH --partition=nextgen
+#SBATCH --time=12:00:00
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
 #SBATCH --cpus-per-task=10
 #SBATCH --gpus-per-node=1
-#SBATCH --constraint=48core
-#SBATCH --time=12:00:00
+#SBATCH --mem=128G
 #SBATCH --account=PAS2836
 #SBATCH --output=slurms/slurm-%j.out
 #SBATCH --error=slurms/slurm-%j.err
