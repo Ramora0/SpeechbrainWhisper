@@ -331,7 +331,7 @@ class ASR(sb.core.Brain):
             loss_boundary = self.boundary_predictor_loss
             target_compression = 1.0 / self.hparams.boundary_predictor_prior
             # Calculate actual compression: original_length / compressed_length
-            actual_compression = (self.total_positions.sum() / self.num_boundaries.sum()).item()
+            actual_compression = self.total_positions / self.num_boundaries
             print(f"Binomial loss: {loss_boundary.item():.6f}, Target compression: {target_compression:.2f}x, Actual compression: {actual_compression:.2f}x")
         else:
             loss_boundary = torch.tensor(0.0, device=p_ctc.device)
