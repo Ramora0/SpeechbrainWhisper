@@ -146,7 +146,7 @@ ctc_weight_decode: 0.40
 boundary_predictor_prior: 1
 boundary_predictor_temp: 1.0
 boundary_predictor_loss_weight: 1.0
-boundary_predictor_similarity_bias: -10
+boundary_predictor_similarity_bias: -10.0
 
 # Anneal compression from 2x to target over training (linear in compression space)
 anneal_compression: True
