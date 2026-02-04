@@ -171,15 +171,14 @@ time_stride_conv: !new:speechbrain.nnet.CNN.Conv2d
   in_channels: 32
   out_channels: 32
   kernel_size: (3, 3)
-  stride: (2, 1)
+  stride: (1, 2)
   padding: same
 
 time_stride_bn: !new:torch.nn.BatchNorm2d
   num_features: 32
 
-time_stride_act: !new:torch.nn.GELU
+time_stride_act: !new:torch.nn.GELU # Combine them in sequence
 
-# Combine them in sequence
 CNN: !new:torch.nn.Sequential
   - !ref <conv_frontend>
   - !ref <time_stride_conv>
