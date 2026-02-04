@@ -79,7 +79,7 @@ n_mels: 80
 # This setup is optimized for H100 80GB GPU
 # Or turn it off (but training speed will decrease)
 dynamic_batching: True
-max_batch_length_train: 2000
+max_batch_length_train: 1000
 max_batch_length_val: 150 # we reduce it as the beam is much wider (VRAM)
 num_bucket: 200
 shuffle: True # if true re-creates batches at each epoch shuffling examples.
@@ -146,7 +146,7 @@ ctc_weight_decode: 0.40
 boundary_predictor_prior: 1
 boundary_predictor_temp: 1.0
 boundary_predictor_loss_weight: 1.0
-boundary_predictor_similarity_bias: 10.0
+boundary_predictor_similarity_bias: -10.0
 
 # Anneal compression from 2x to target over training (linear in compression space)
 anneal_compression: True
