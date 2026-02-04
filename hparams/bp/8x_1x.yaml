@@ -174,16 +174,9 @@ time_stride_conv: !new:speechbrain.nnet.CNN.Conv2d
   stride: (1, 2)
   padding: same
 
-time_stride_bn: !new:torch.nn.BatchNorm2d
-  num_features: 32
-
-time_stride_act: !new:torch.nn.GELU # Combine them in sequence
-
 CNN: !new:torch.nn.Sequential
   - !ref <conv_frontend>
   - !ref <time_stride_conv>
-  - !ref <time_stride_bn>
-  - !ref <time_stride_act>
 
 Transformer:
   !new:speechbrain.lobes.models.transformer.TransformerASR.TransformerASR # yamllint disable-line rule:line-length
