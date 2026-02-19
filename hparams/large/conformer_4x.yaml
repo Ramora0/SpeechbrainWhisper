@@ -54,7 +54,7 @@ test_csv:
 # Empirically, we found that this value should be >= 128.
 # Please, set your parameters accordingly.
 number_of_epochs: 60
-batch_size: 16 # This works for 2x GPUs with 32GB
+batch_size: 64 # A100 80GB
 ctc_weight: 0.3
 grad_accumulation_factor: 1
 max_grad_norm: 5.0
