@@ -53,9 +53,9 @@ test_csv:
 # The global batch size is computed as batch_size * n_gpus * grad_accumulation_factor.
 # Empirically, we found that this value should be >= 128.
 # Please, set your parameters accordingly.
-number_of_epochs: 70
-batch_size: 256 # Optimized for single H100 80GB (global batch size >= 128)
-ctc_weight: 0
+number_of_epochs: 70  
+batch_size: 256 # TODO: Ablate batch size 1
+ctc_weight: 0.3
 grad_accumulation_factor: 1
 max_grad_norm: 5.0
 loss_reduction: "batchmean"

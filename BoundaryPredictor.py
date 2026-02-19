@@ -256,7 +256,7 @@ class BoundaryPredictor2(nn.Module):
         q_hidden = self.q_proj_layer(F.normalize(
             q_mlp_out + q_normed, dim=-1, eps=1e-8))
 
-        k_mlp_out = self.boundary_mlp(k_normed)
+        k_mlp_out = self.boundary_mlp(k_normed) # TODO: Ablate
         k_hidden = self.k_proj_layer(F.normalize(
             k_mlp_out + k_normed, dim=-1, eps=1e-8))
 
@@ -283,7 +283,7 @@ class BoundaryPredictor2(nn.Module):
                 print(f"  Number of NaN values: {torch.isnan(probs).sum()}")
                 print(f"  cos_sim min/max: {cos_sim.min()}/{cos_sim.max()}")
                 print(f"  similarity_bias: {self.similarity_bias.item()}")
-        if self.training:
+        if self.training: # TODO: Distribution shift
             bernoulli = torch.distributions.relaxed_bernoulli.RelaxedBernoulli(
                 temperature=self.temp,
                 probs=probs,
@@ -313,7 +313,7 @@ class BoundaryPredictor2(nn.Module):
         soft_boundaries = soft_boundaries * valid_mask
         hard_samples = hard_samples * valid_mask
 
-        # Set boundary at first padding position using advanced indexing
+        # Set boundary at first padding position using indexing
         # Only set if valid_len < boundary_seq_len
         needs_boundary_mask = valid_lens < boundary_seq_len
         if needs_boundary_mask.any():

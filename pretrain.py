@@ -209,7 +209,7 @@ class ASR(sb.core.Brain):
 
         # Apply BoundaryPredictor with lengths (overwrites enc and enc_lens)
         (enc, bp_loss, num_boundaries, total_positions,
-         enc_lens, boundary_cv, boundary_adjacent_pct) = self.modules.BoundaryPredictor(
+         enc_lens, boundary_cv, boundary_adjacent_pct) = self.modules.BoundaryPredictor( # TODO: Ablate fixed pooling
             hidden=enc,
             lengths=enc_lens,
             target_boundary_counts=target_boundary_counts,
