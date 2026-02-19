@@ -54,7 +54,7 @@ test_csv:
 # Empirically, we found that this value should be >= 128.
 # Please, set your parameters accordingly.
 number_of_epochs: 60
-batch_size: 64 # A100 80GB
+batch_size: 16 # ignored when dynamic_batching is True
 ctc_weight: 0.3
 grad_accumulation_factor: 1
 max_grad_norm: 5.0
@@ -65,7 +65,7 @@ precision: bf16 # bf16, fp16 or fp32 - H100 has excellent BF16 Tensor Core perfo
 avg_checkpoints: 10 # Number of checkpoints to average for evaluation
 
 # stages related parameters
-lr_adam: 0.0008
+lr_adam: 0.0016
 warmup: 50000
 augment_warmup: 8000
 
@@ -75,11 +75,11 @@ n_fft: 512
 n_mels: 80
 win_length: 32
 
-# This setup works well for V100 32GB GPU, adapts it to your needs.
+# This setup is optimized for A100 80GB GPU
 # Or turn it off (but training speed will decrease)
 dynamic_batching: True
-max_batch_length_train: 150
-max_batch_length_val: 100 # we reduce it as the beam is much wider (VRAM)
+max_batch_length_train: 600
+max_batch_length_val: 300 # we reduce it as the beam is much wider (VRAM)
 num_bucket: 200
 shuffle: True # if true re-creates batches at each epoch shuffling examples.
 batch_ordering: random
