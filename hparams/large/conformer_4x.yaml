@@ -10,8 +10,9 @@
 # Seed needs to be set at top of yaml, before objects with parameters are made
 
 seed: 3407
+experiment_name: conformer_large_4x
 __set_seed: !apply:speechbrain.utils.seed_everything [!ref <seed>]
-output_folder: !ref results/conformer_large/<seed>
+output_folder: !ref /fs/scratch/PAS2836/lees_stuff/librispeechbrain/results/conformer_large/<seed>
 output_wer_folder: !ref <output_folder>/
 save_folder: !ref <output_folder>/save
 train_log: !ref <output_folder>/train_log.txt
@@ -25,21 +26,26 @@ train_log: !ref <output_folder>/train_log.txt
 pretrained_lm_tokenizer_path: speechbrain/asr-transformer-transformerlm-librispeech
 
 # Data files
-data_folder: !PLACEHOLDER  # e.g., /path/to/LibriSpeech
-# If RIRS_NOISES dir exists in /localscratch/xxx_corpus/RIRS_NOISES
-# then data_folder_rirs should be /localscratch/xxx_corpus
-# otherwise the dataset will automatically be downloaded
-# data_folder_rirs: !ref <data_folder>
+data_folder:
+  /fs/scratch/PAS2836/lees_stuff/librispeechbrain/LibriSpeech
+  # e.g., /path/to/LibriSpeech
+  # If RIRS_NOISES dir exists in /localscratch/xxx_corpus/RIRS_NOISES
+  # then data_folder_rirs should be /localscratch/xxx_corpus
+  # otherwise the dataset will automatically be downloaded
+  # data_folder_rirs: !ref <data_folder>
+
+# Shared data manifest location (created once, used by all experiments)
+data_manifest_folder: /fs/scratch/PAS2836/lees_stuff/librispeechbrain/data_manifests
+
 train_splits: ["train-clean-100", "train-clean-360", "train-other-500"]
 dev_splits: ["dev-clean"]
-test_splits: ["dev-clean", "test-clean", "test-other"]
+test_splits: ["test-clean", "test-other"]
 skip_prep: False
-train_csv: !ref <output_folder>/train.csv
-valid_csv: !ref <output_folder>/dev-clean.csv
+train_csv: !ref <data_manifest_folder>/train.csv
+valid_csv: !ref <data_manifest_folder>/dev-clean.csv
 test_csv:
-    - !ref <output_folder>/dev-clean.csv
-    - !ref <output_folder>/test-clean.csv
-    - !ref <output_folder>/test-other.csv
+    - !ref <data_manifest_folder>/test-clean.csv
+    - !ref <data_manifest_folder>/test-other.csv
 
 ####################### Training Parameters ####################################
 
@@ -54,8 +60,8 @@ grad_accumulation_factor: 1
 max_grad_norm: 5.0
 loss_reduction: 'batchmean'
 sorting: random
-num_workers: 4
-precision: fp16 # bf16, fp16 or fp32
+num_workers: 10
+precision: bf16 # bf16, fp16 or fp32 - H100 has excellent BF16 Tensor Core performance
 avg_checkpoints: 10 # Number of checkpoints to average for evaluation
 
 # stages related parameters
@@ -320,8 +326,13 @@ compute_features: !new:speechbrain.lobes.features.Fbank
 
 ############################## Logging and Pretrainer ##########################
 
-train_logger: !new:speechbrain.utils.train_logger.FileTrainLogger
-    save_file: !ref <train_log>
+train_logger: !new:speechbrain.utils.train_logger.WandBLogger
+    initializer: !name:wandb.init
+    entity: null
+    project: glimpse-pretraining
+    name: !ref <experiment_name>_<seed>
+    dir: !ref <output_folder>
+    reinit: True
 
 error_rate_computer: !name:speechbrain.utils.metric_stats.ErrorRateStats
 acc_computer: !name:speechbrain.utils.Accuracy.AccuracyStats
