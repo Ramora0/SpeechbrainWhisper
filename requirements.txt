@@ -1,0 +1,17 @@
+# Core
+torch
+torchaudio
+
+# ASR framework — install separately from local clone:
+#   pip install -e ../speechbrain
+# speechbrain
+
+# Config & tokenization
+hyperpyyaml
+sentencepiece
+
+# Phoneme counting for BoundaryPredictor targets
+g2p_en
+
+# Logging
+wandb
