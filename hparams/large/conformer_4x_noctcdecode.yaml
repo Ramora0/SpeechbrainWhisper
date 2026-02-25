@@ -1,7 +1,7 @@
 # ############################################################################
 # Model: E2E ASR with Transformer
 # Encoder: Conformer Encoder
-# Decoder: Transformer Decoder + (CTC/ATT joint) beamsearch + TransformerLM
+# Decoder: Transformer Decoder + ATT beamsearch (no CTC decode) + TransformerLM
 # Tokens: unigram
 # losses: CTC + KLdiv (Label Smoothing loss)
 # Training: Librispeech 960h
@@ -10,7 +10,7 @@
 # Seed needs to be set at top of yaml, before objects with parameters are made
 
 seed: 58008
-experiment_name: conformer_large_4x
+experiment_name: conformer_large_4x_noctcdecode
 __set_seed: !apply:speechbrain.utils.seed_everything [!ref <seed>]
 output_folder: !ref /fs/scratch/PAS2836/lees_stuff/librispeechbrain/results/conformer_large/<seed>
 output_wer_folder: !ref <output_folder>/
@@ -137,7 +137,7 @@ valid_search_interval: 10
 valid_beam_size: 10
 test_beam_size: 66
 lm_weight: 0.60
-ctc_weight_decode: 0.40
+ctc_weight_decode: 0.0
 
 ############################## Models ##########################################
 
@@ -212,26 +212,18 @@ model: !new:torch.nn.ModuleList
 
 ####################### Decoding & optimiser ###########################
 
-ctc_scorer: !new:speechbrain.decoders.scorer.CTCScorer
-    eos_index: !ref <eos_index>
-    blank_index: !ref <blank_index>
-    ctc_fc: !ref <ctc_lin>
-
-
 transformerlm_scorer: !new:speechbrain.decoders.scorer.TransformerLMScorer
     language_model: !ref <lm_model>
     temperature: 1.15
 
 scorer_test_search: !new:speechbrain.decoders.scorer.ScorerBuilder
-    full_scorers: [!ref <transformerlm_scorer>, !ref <ctc_scorer>]
+    full_scorers: [!ref <transformerlm_scorer>]
     weights:
-        ctc: !ref <ctc_weight_decode>
         transformerlm: !ref <lm_weight>
 
 scorer_valid_search: !new:speechbrain.decoders.scorer.ScorerBuilder
-    full_scorers: [!ref <ctc_scorer>]
-    weights:
-        ctc: !ref <ctc_weight_decode>
+    full_scorers: []
+    weights: {}
 
 valid_search: !new:speechbrain.decoders.S2STransformerBeamSearcher
     modules: [!ref <Transformer>, !ref <seq_lin>]
