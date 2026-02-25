@@ -9,7 +9,7 @@
 # ############################################################################
 # Seed needs to be set at top of yaml, before objects with parameters are made
 
-seed: 58008
+seed: 42
 experiment_name: conformer_large_4x_noctcdecode
 __set_seed: !apply:speechbrain.utils.seed_everything [!ref <seed>]
 output_folder: !ref /fs/scratch/PAS2836/lees_stuff/librispeechbrain/results/conformer_large/<seed>
