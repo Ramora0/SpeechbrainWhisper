@@ -65,7 +65,7 @@ precision: bf16 # bf16, fp16 or fp32 - H100 has excellent BF16 Tensor Core perfo
 avg_checkpoints: 10 # Number of checkpoints to average for evaluation
 
 # stages related parameters
-lr_adam: 0.0016
+lr_adam: 0.0032
 warmup: 50000
 augment_warmup: 8000
 

@@ -1,12 +1,11 @@
 #!/bin/bash
 #SBATCH --job-name=train_bp
-#SBATCH --partition=nextgen
+#SBATCH --partition=gpu
 #SBATCH --time=12:00:00
 #SBATCH --nodes=1
-#SBATCH --ntasks-per-node=1
+#SBATCH --ntasks=1
 #SBATCH --cpus-per-task=10
-#SBATCH --gpus-per-node=1
-#SBATCH --mem=128G
+#SBATCH --gpus-per-task=1
 #SBATCH --account=PAS2836
 #SBATCH --output=slurms/slurm-%j.out
 #SBATCH --error=slurms/slurm-%j.err
@@ -15,11 +14,11 @@ set -euo pipefail
 
 if [[ $# -lt 1 ]]; then
   echo "Usage:"
-  echo "  sbatch [--time=H:00:00] train-a100.slurm [--raw] <compression_name>"
-  echo "  sbatch [--time=H:00:00] train-a100.slurm [--raw] /full/path/to/hparams.yaml"
+  echo "  sbatch [--time=H:00:00] train-h100.slurm [--raw] <compression_name>"
+  echo "  sbatch [--time=H:00:00] train-h100.slurm [--raw] /full/path/to/hparams.yaml"
   echo "Examples:"
-  echo "  sbatch --time=8:00:00 slurms/train-a100.slurm 2x_5-2x"
-  echo "  sbatch slurms/train-a100.slurm --raw hparams/bp/2x_5-2x.yaml"
+  echo "  sbatch --time=8:00:00 slurms/train-h100.slurm 2x_5-2x"
+  echo "  sbatch slurms/train-h100.slurm --raw hparams/bp/2x_5-2x.yaml"
   exit 1
 fi
 
@@ -60,5 +59,5 @@ mkdir -p "$TMPDIR/LibriSpeech" "$TMPDIR/data_manifests"
 rsync -a --info=progress2 /fs/scratch/PAS2836/lees_stuff/librispeechbrain/LibriSpeech/ "$TMPDIR/LibriSpeech/" && \
 rsync -a --info=progress2 /fs/scratch/PAS2836/lees_stuff/librispeechbrain/data_manifests/ "$TMPDIR/data_manifests/"
 
-source .a100/bin/activate
+source .h100/bin/activate
 python "${TRAIN_SCRIPT}" "${HPARAMS_PATH}" "$@"
