@@ -4,7 +4,7 @@
 #SBATCH --time=12:00:00
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
-#SBATCH --cpus-per-task=10
+#SBATCH --cpus-per-task=4
 #SBATCH --gpus-per-task=1
 #SBATCH --account=PAS2836
 #SBATCH --output=slurms/slurm-%j.out
