@@ -185,10 +185,11 @@ class ASR(sb.core.Brain):
         #     target_boundary_counts = None
 
         # Option 2: Prior-based targets (current approach)
-        # The prior determines the desired compression rate:
+        # The prior is the fraction of positions that should be boundaries:
         # - prior = 1.0 means no compression (1 boundary per position)
-        # - prior = 2.0 means 2x compression (1 boundary per 2 positions)
-        # target_counts = total_positions / prior
+        # - prior = 0.5 means 2x compression (1 boundary per 2 positions)
+        # - prior = 0.125 means 8x compression (1 boundary per 8 positions)
+        # target_counts = total_positions * prior
         if stage == sb.Stage.TRAIN:
             prior = self.hparams.boundary_predictor_prior
             batch_size, seq_len, _ = enc.shape
@@ -196,7 +197,7 @@ class ASR(sb.core.Brain):
             total_positions = (enc_lens * seq_len).float()
             # Target boundary counts based on prior
             target_boundary_counts = (
-                total_positions / prior).round().clamp(min=1.0)
+                total_positions * prior).round().clamp(min=1.0)
 
             if flags.PRINT_DATA:
                 print(f"[Target Boundaries] prior: {prior}")

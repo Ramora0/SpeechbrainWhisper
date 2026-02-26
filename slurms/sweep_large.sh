@@ -15,7 +15,7 @@ for config in 4x 8x 16x 32x; do
 done
 
 # Large BP experiments
-for config in 2x_2x 2x_4x 2x_8x 2x_16x 2x_p 2x_5-2; do
+for config in 2x_2x 2x_4x 2x_8x 2x_16x 2xp 2x_5-2; do
     echo "Submitting large BP ${config}..."
     sbatch --time="${TIME}" "${SLURM_SCRIPT}" "hparams/large/bp/${config}.yaml"
 done
