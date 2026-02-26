@@ -204,6 +204,10 @@ lm_model:
 
 tokenizer: !new:sentencepiece.SentencePieceProcessor
 
+ctc_lin: !new:speechbrain.nnet.linear.Linear
+  input_size: !ref <d_model>
+  n_neurons: !ref <output_neurons>
+
 seq_lin: !new:speechbrain.nnet.linear.Linear
   input_size: !ref <d_model>
   n_neurons: !ref <output_neurons>
@@ -217,10 +221,11 @@ modules:
   BoundaryPredictor: !ref <BoundaryPredictor>
   Transformer: !ref <Transformer>
   seq_lin: !ref <seq_lin>
+  ctc_lin: !ref <ctc_lin>
   normalize: !ref <normalize>
 
 model: !new:torch.nn.ModuleList
-  - [!ref <CNN>, !ref <BoundaryPredictor>, !ref <Transformer>, !ref <seq_lin>]
+  - [!ref <CNN>, !ref <BoundaryPredictor>, !ref <Transformer>, !ref <seq_lin>, !ref <ctc_lin>]
 
 # define two optimizers here for two-stage training
 Adam: !name:torch.optim.AdamW
@@ -272,6 +277,9 @@ log_softmax: !new:torch.nn.LogSoftmax
 seq_cost: !name:speechbrain.nnet.losses.kldiv_loss
   label_smoothing: !ref <label_smoothing>
   reduction: !ref <loss_reduction>
+
+ctc_cost: !name:speechbrain.nnet.losses.ctc_loss
+  blank_index: !ref <blank_index>
 
 noam_annealing: !new:speechbrain.nnet.schedulers.NoamScheduler
   lr_initial: !ref <lr_adam>

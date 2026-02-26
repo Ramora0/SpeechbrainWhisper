@@ -199,24 +199,15 @@ class ASR(sb.core.Brain):
             p_ctc, tokens, enc_lens, tokens_lens
         ).sum()
 
-        # QFormer loss is always 0
-        if stage == sb.Stage.TRAIN:
-            loss_boundary = self.boundary_predictor_loss
-            actual_compression = self.total_positions / self.num_boundaries if self.num_boundaries > 0 else float('inf')
-            print(f"Binomial loss: {loss_boundary.item():.6f}, Actual compression: {actual_compression:.2f}x")
-        else:
-            loss_boundary = torch.tensor(0.0, device=p_ctc.device)
-
-        # Combine losses
-        loss_asr = (
+        loss = (
             self.hparams.ctc_weight * loss_ctc
             + (1 - self.hparams.ctc_weight) * loss_seq
         )
 
-        loss = (
-            loss_asr
-            + self.hparams.boundary_predictor_loss_weight * loss_boundary
-        )
+        # Log compression stats
+        if stage == sb.Stage.TRAIN:
+            actual_compression = self.total_positions / self.num_boundaries if self.num_boundaries > 0 else float('inf')
+            print(f"Actual compression: {actual_compression:.2f}x")
 
         if stage != sb.Stage.TRAIN:
             current_epoch = self.hparams.epoch_counter.current
