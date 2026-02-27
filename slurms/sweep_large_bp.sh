@@ -8,7 +8,7 @@ SLURM_SCRIPT="slurms/train-a100.slurm"
 TIME="12:00:00"
 RESULTS_DIR="/fs/scratch/PAS2836/lees_stuff/librispeechbrain/results"
 
-for config in 2x_2x 2x_4x 2x_8x 2x_16x 2xp 2x_5-2; do
+for config in 2x_2x 2x_4x 2x_8x 2x_16x 2x_p 2x_5-2; do
     yaml="hparams/large/bp/${config}.yaml"
     exp_name=$(grep '^experiment_name:' "$yaml" | awk '{print $2}')
     seed=$(grep '^seed:' "$yaml" | awk '{print $2}')

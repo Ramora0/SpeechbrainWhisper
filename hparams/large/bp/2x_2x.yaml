@@ -178,7 +178,7 @@ Transformer: !new:speechbrain.lobes.models.transformer.TransformerASR.Transforme
     normalize_before: True
     causal: False
 
-BoundaryPredictor: !new:BoundaryPredictor.BoundaryPredictor2
+BoundaryPredictor: !new:BoundaryPredictor2.BoundaryPredictor2
     input_dim: 640
     prior: !ref <boundary_predictor_prior>
     temp: !ref <boundary_predictor_temp>
