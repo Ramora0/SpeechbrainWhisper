@@ -145,6 +145,8 @@ ctc_weight_decode: 0.40
 boundary_predictor_prior: 0.192
 boundary_predictor_temp: 1.0
 boundary_predictor_loss_weight: 1.0
+adaptive_boundary_budget: True
+nudge_strength: 0.5
 
 # Phoneme-based boundary targets
 target_phonemes: True # Enable phoneme counting
@@ -303,6 +305,14 @@ ctc_cost: !name:speechbrain.nnet.losses.ctc_loss
 seq_cost: !name:speechbrain.nnet.losses.kldiv_loss
   label_smoothing: !ref <label_smoothing>
   reduction: !ref <loss_reduction>
+
+seq_cost_persample: !name:speechbrain.nnet.losses.kldiv_loss
+  label_smoothing: !ref <label_smoothing>
+  reduction: batch
+
+ctc_cost_persample: !name:speechbrain.nnet.losses.ctc_loss
+  blank_index: !ref <blank_index>
+  reduction: batch
 
 noam_annealing: !new:speechbrain.nnet.schedulers.NoamScheduler
   lr_initial: !ref <lr_adam>

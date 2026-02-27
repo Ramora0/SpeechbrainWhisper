@@ -312,6 +312,7 @@ class BoundaryPredictor2(nn.Module):
         # Zero out padding positions
         soft_boundaries = soft_boundaries * valid_mask
         hard_samples = hard_samples * valid_mask
+        masked_probs = probs * valid_mask  # (B, L) — for nudge loss
 
         # Set boundary at first padding position using indexing
         # Only set if valid_len < boundary_seq_len
@@ -494,6 +495,7 @@ class BoundaryPredictor2(nn.Module):
 
         actual_lens = (lengths * seq_len).long()
         total_positions_tensor = actual_lens.sum().float()
+        total_positions_per_sample = actual_lens.float()  # (B,)
 
         if self.training:
             per_sample_loss = self.calc_loss_target_counts(
@@ -594,6 +596,9 @@ class BoundaryPredictor2(nn.Module):
             shortened_lengths,
             boundary_cv,
             boundary_adjacent_pct,
+            masked_probs,                # (B, L) — boundary probs, masked
+            num_boundaries_per_sample,   # (B,) — boundaries per sample
+            total_positions_per_sample,  # (B,) — valid positions per sample
         )
 
     def calc_loss_target_counts(

@@ -1,9 +1,9 @@
 # ############################################################################
-# Model: E2E ASR with Transformer + BoundaryPredictor
+# Model: E2E ASR with Transformer + BoundaryPredictor (Adaptive Budget)
 # Encoder: Conformer Encoder
 # Decoder: Transformer Decoder + (CTC/ATT joint) beamsearch + TransformerLM
 # Tokens: unigram
-# losses: CTC + KLdiv (Label Smoothing loss) + Boundary Loss
+# losses: CTC + KLdiv (Label Smoothing loss) + Adaptive Boundary Budget
 # Training: Librispeech 960h
 # Total compression: 4x = 2x (CNN) * 2x (BoundaryPredictor)
 # Authors:  Jianyuan Zhong, Titouan Parcollet, Samuele Cornell
@@ -11,7 +11,7 @@
 # Seed needs to be set at top of yaml, before objects with parameters are made
 
 seed: 58008
-experiment_name: bp_large_2x_2x
+experiment_name: bp2_large_2x_2x
 use_bp: True
 __set_seed: !apply:speechbrain.utils.seed_everything [!ref <seed>]
 output_folder: !ref /fs/scratch/PAS2836/lees_stuff/librispeechbrain/results/<experiment_name>/<seed>
@@ -146,7 +146,9 @@ ctc_weight_decode: 0.40
 # BP prior = 1/2 = 0.5
 boundary_predictor_prior: 0.5
 boundary_predictor_temp: 1.0
-boundary_predictor_loss_weight: 10.0
+boundary_predictor_loss_weight: 1.0
+adaptive_boundary_budget: True
+nudge_strength: 0.5
 
 # Prior-based boundary targets (not phoneme-based)
 target_phonemes: False
@@ -285,6 +287,14 @@ ctc_cost: !name:speechbrain.nnet.losses.ctc_loss
 seq_cost: !name:speechbrain.nnet.losses.kldiv_loss
     label_smoothing: !ref <label_smoothing>
     reduction: !ref <loss_reduction>
+
+seq_cost_persample: !name:speechbrain.nnet.losses.kldiv_loss
+    label_smoothing: !ref <label_smoothing>
+    reduction: batch
+
+ctc_cost_persample: !name:speechbrain.nnet.losses.ctc_loss
+    blank_index: !ref <blank_index>
+    reduction: batch
 
 noam_annealing: !new:speechbrain.nnet.schedulers.NoamScheduler
     lr_initial: !ref <lr_adam>

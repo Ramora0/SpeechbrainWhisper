@@ -1,22 +1,29 @@
 #!/usr/bin/env python3
 """
-Empirical test: Can downstream gradients change boundary COUNTS
-when flowing through sampled boundaries + mean pooling?
+Can the boundary predictor learn per-sample adaptive compression?
 
-Minimal setup:
-  - MLP boundary detector (hidden -> sigmoid -> per-position probability)
-  - RelaxedBernoulli sampling + STE
-  - Mean pooling using common() from utils.py (same segment assignment
-    as the real BoundaryPredictor2)
-  - Downstream loss on the pooled output
+Setup: two input classes per batch —
+  SIMPLE  = piecewise constant (few boundaries needed)
+  COMPLEX = random noise (many boundaries needed)
+
+The boundary detector is a standard per-token MLP (hidden → logit → sigmoid).
+No cosine similarity, no adjacent-frame comparison — just a pointwise
+predictor. This removes any inductive bias so that any separation between
+classes must come from the training signal.
 
 Experiments:
-  1. GRADIENT INSPECTION — Check which params get gradient from downstream loss.
+  1. GRADIENT DIRECTION — When adding a boundary would help the downstream
+     loss, does the gradient through cumsum+soft_mask agree? 50% = no signal.
 
-  2a. Loss REWARDS FEWER boundaries — same init as 2b. Count should not drop.
-  2b. Loss REWARDS MORE boundaries  — same init as 2a. Count should not rise.
+  2. DOWNSTREAM ONLY — Train with reconstruction loss (upstream frozen).
+     The only way to reduce loss is by changing boundary count/placement.
 
-  3. DIRECT CONTROL — Loss on boundary probs. Count converges. Proves MLP works.
+  3. BINOMIAL LOSS — Train with per-sample binomial loss (different target
+     counts for simple vs complex).
+
+  4. BOTH LOSSES — Binomial + downstream together.
+
+Uses gradient-preserving cumsum + soft_mask pooling from BoundaryPredictor2.
 """
 
 import torch
@@ -24,14 +31,53 @@ import torch.nn as nn
 import torch.nn.functional as F
 import sys
 
-from utils import common
+
+# ──────────────────────────────────────────────────────────────────────
+# common() and pooling — from BoundaryPredictor2.py
+# ──────────────────────────────────────────────────────────────────────
+
+def common(boundaries):
+    """Arithmetic segment-distance matrix (gradient-preserving)."""
+    boundaries = boundaries.clone()
+    n_segments = int(boundaries.sum(dim=-1).max().item())
+    if n_segments == 0:
+        return None
+    tmp = torch.zeros_like(boundaries).unsqueeze(2) + torch.arange(
+        start=0, end=n_segments, device=boundaries.device)
+    hh1 = boundaries.cumsum(1)
+    hh1 -= boundaries
+    foo = tmp - hh1.unsqueeze(-1)
+    return foo
+
+
+def mean_pool(boundaries, hidden):
+    """Gradient-preserving mean pooling via soft_mask = (1 - foo)."""
+    B, T, D = hidden.shape
+    foo = common(boundaries)
+    if foo is None:
+        return torch.zeros(B, 1, D, device=hidden.device)
+    out_of_segment = (foo.detach() != 0)
+    soft_mask = torch.where(out_of_segment, torch.zeros_like(foo), 1.0 - foo)
+    counts = soft_mask.sum(dim=1).clamp(min=1e-8)
+    seg_sum = torch.bmm(soft_mask.transpose(1, 2), hidden)
+    return seg_sum / counts.unsqueeze(-1)
+
+
+def binomial_loss(num_boundaries, total_positions, target_counts, eps=1e-6):
+    """Per-sample binomial loss (from loss.py)."""
+    clamped_totals = total_positions.clamp(min=1.0)
+    clamped_targets = torch.minimum(target_counts, clamped_totals)
+    target_probs = (clamped_targets / clamped_totals).clamp(min=eps, max=1 - eps)
+    dist = torch.distributions.Binomial(
+        total_count=clamped_totals, probs=target_probs)
+    return -dist.log_prob(num_boundaries) / clamped_totals
 
 
 # ──────────────────────────────────────────────────────────────────────
-# Minimal boundary predictor using common() for segment assignment
+# Boundary predictor: standard per-token MLP
 # ──────────────────────────────────────────────────────────────────────
 
-class MinimalBoundaryPredictor(nn.Module):
+class MinimalBP(nn.Module):
     def __init__(self, input_dim, temp=0.5, init_bias=0.0):
         super().__init__()
         self.temp = temp
@@ -41,7 +87,7 @@ class MinimalBoundaryPredictor(nn.Module):
         with torch.no_grad():
             self.upstream.weight.copy_(torch.eye(input_dim))
 
-        # Boundary detector: MLP -> scalar logit per position
+        # Per-token MLP: hidden → logit → sigmoid
         self.boundary_mlp = nn.Sequential(
             nn.Linear(input_dim, input_dim),
             nn.GELU(),
@@ -54,7 +100,7 @@ class MinimalBoundaryPredictor(nn.Module):
         logits = self.boundary_mlp(hidden).squeeze(-1)  # [B, T]
         return torch.sigmoid(logits)
 
-    def _sample_boundaries(self, probs):
+    def _sample(self, probs):
         dist = torch.distributions.RelaxedBernoulli(
             temperature=self.temp,
             probs=probs.clamp(1e-6, 1 - 1e-6),
@@ -63,290 +109,325 @@ class MinimalBoundaryPredictor(nn.Module):
         hard = (soft > 0.5).float()
         return hard - soft.detach() + soft, soft
 
-    def _mean_pool(self, boundaries, hidden):
-        """Mean-pool using common() from utils.py — same as real BP."""
-        B, T, D = hidden.shape
-
-        foo = common(boundaries)  # [B, L, S] distance matrix
-
-        if foo is None:
-            return torch.zeros(B, 1, D, device=hidden.device)
-
-        max_segs = foo.size(2)
-
-        # Segment membership: same as BoundaryPredictor2 line 158
-        segment_mask = (foo == 0).float()  # [B, L, S]
-
-        # Mean pool: sum / count using the membership mask
-        counts = segment_mask.sum(dim=1).clamp(min=1e-8)  # [B, S]
-        seg_sum = torch.bmm(segment_mask.transpose(1, 2), hidden)  # [B, S, D]
-        pooled = seg_sum / counts.unsqueeze(-1)
-
-        return pooled
-
-    def forward(self, raw_input):
-        hidden = self.upstream(raw_input)
+    def forward(self, x):
+        hidden = self.upstream(x)
         probs = self._compute_probs(hidden)
-        boundaries, soft = self._sample_boundaries(probs)
-
+        boundaries, soft = self._sample(probs)
         if (boundaries.sum(dim=1) == 0).any():
             idx = (boundaries.sum(dim=1) == 0).nonzero(as_tuple=True)[0]
             boundaries[idx, -1] = 1.0
-
-        pooled = self._mean_pool(boundaries, hidden)
-        return pooled, boundaries.sum().item(), probs
-
-
-# ──────────────────────────────────────────────────────────────────────
-# Helpers
-# ──────────────────────────────────────────────────────────────────────
-
-BD_KEYS = ["boundary_mlp"]
-UP_KEYS = ["upstream"]
+        pooled = mean_pool(boundaries, hidden)
+        return pooled, boundaries, probs, soft
 
 
-def eval_stats(bp, x):
+def eval_boundary_rate(bp, x):
+    """Deterministic boundary count and mean prob, per sample."""
     bp.eval()
     with torch.no_grad():
         hidden = bp.upstream(x)
         probs = bp._compute_probs(hidden)
-        count = (probs > 0.5).float().sum().item()
-        mp = probs.mean().item()
+        count = (probs > 0.5).float().sum(dim=1)
+        mp = probs.mean(dim=1)
     bp.train()
     return count, mp
 
 
-def snapshot(model, keys):
-    return {n: p.detach().clone() for n, p in model.named_parameters()
-            if any(k in n for k in keys)}
+# ──────────────────────────────────────────────────────────────────────
+# Data generation
+# ──────────────────────────────────────────────────────────────────────
+
+T = 40
+D = 32
+B = 8  # 4 simple + 4 complex
+SIMPLE_TARGET = 5.0
+COMPLEX_TARGET = 15.0
 
 
-def max_change(before, after):
-    return max((after[n] - before[n]).abs().max().item() for n in before) if before else 0.0
+def make_batch():
+    """First B//2 = SIMPLE (piecewise constant), last B//2 = COMPLEX (random)."""
+    simple = torch.zeros(B // 2, T, D)
+    for i in range(B // 2):
+        n_segs = 5
+        seg_len = T // n_segs
+        for s in range(n_segs):
+            val = torch.randn(D) * 2.0
+            start = s * seg_len
+            end = (s + 1) * seg_len if s < n_segs - 1 else T
+            simple[i, start:end] = val
+    complex_ = torch.randn(B // 2, T, D)
+    x = torch.cat([simple, complex_], dim=0)
+    targets = torch.tensor(
+        [SIMPLE_TARGET] * (B // 2) + [COMPLEX_TARGET] * (B // 2))
+    return x, targets
+
+
+def print_rates(step, loss, bp, x):
+    counts, mps = eval_boundary_rate(bp, x)
+    sr = mps[:B // 2].mean().item()
+    cr = mps[B // 2:].mean().item()
+    sc = counts[:B // 2].mean().item()
+    cc = counts[B // 2:].mean().item()
+    print(f"  Step {step:4d}: loss={loss:.6f}  "
+          f"simple={sr:.4f} ({sc:.0f}b)  complex={cr:.4f} ({cc:.0f}b)")
+    return sr, cr
 
 
 # ──────────────────────────────────────────────────────────────────────
-# Experiment 1: Gradient Inspection
+# Experiment 1: Gradient direction accuracy
 # ──────────────────────────────────────────────────────────────────────
 
-def experiment_1(x):
+def experiment_1():
     print("=" * 70)
-    print("EXPERIMENT 1: Gradient Inspection")
+    print("EXPERIMENT 1: Gradient direction accuracy")
     print("=" * 70)
-    print("Forward downstream loss through mean-pooled output (using common()).")
-    print("Check which parameters receive nonzero gradient.\n")
-
-    D = x.shape[2]
-    bp = MinimalBoundaryPredictor(input_dim=D, temp=0.5)
-    bp.train()
-
-    pooled, num_b, probs = bp(x)
-    loss = pooled.pow(2).mean()
-    loss.backward()
-
-    print(f"  {'Parameter':<40s} {'Grad norm':>10s}  Category")
-    print(f"  {'-'*40} {'-'*10}  {'-'*15}")
-
-    all_bd_zero = True
-    up_nonzero = False
-    for name, param in bp.named_parameters():
-        gn = param.grad.norm().item() if param.grad is not None else 0.0
-        is_bd = any(k in name for k in BD_KEYS)
-        is_up = any(k in name for k in UP_KEYS)
-        cat = "BOUNDARY-MLP" if is_bd else ("UPSTREAM/CNN" if is_up else "???")
-        tag = "ZERO" if gn < 1e-10 else "NONZERO"
-        print(f"  {name:<40s} {gn:>10.2e}  [{cat}] {tag}")
-        if is_bd and gn > 1e-10:
-            all_bd_zero = False
-        if is_up and gn > 1e-10:
-            up_nonzero = True
-
     print()
-    if all_bd_zero and up_nonzero:
-        print("  Boundary MLP gets ZERO gradient from downstream loss.")
-        print("  Upstream (CNN) gets NONZERO gradient.")
-    elif all_bd_zero and not up_nonzero:
-        print("  Both boundary MLP and upstream get zero gradient.")
-    else:
-        print("  Boundary MLP got NONZERO gradient from downstream loss!")
-    return all_bd_zero, not all_bd_zero
-
-
-# ──────────────────────────────────────────────────────────────────────
-# Experiment 2a: Fewer boundaries would help
-# ──────────────────────────────────────────────────────────────────────
-
-def experiment_2a(x, steps=500):
+    print("  Does the continuous gradient through pooling correctly predict")
+    print("  whether adding a boundary reduces reconstruction loss?")
+    print("  50% = random chance = no useful signal.")
     print()
-    print("=" * 70)
-    print("EXPERIMENT 2a: Downstream loss REWARDS FEWER boundaries")
-    print("=" * 70)
-    print("Same init as 2b (init_bias=0.0, ~50% boundary rate).")
-    print("Loss = pooled.pow(2).mean() — fewer segments = less to minimize.")
-    print(f"If gradient worked, boundary count would DROP over {steps} steps.\n")
 
-    D = x.shape[2]
-    bp = MinimalBoundaryPredictor(input_dim=D, temp=0.5, init_bias=0.0)
+    N_TRIALS = 1000
+    aligned = 0
+    misaligned = 0
+    zero_grad = 0
 
-    init_count, init_mp = eval_stats(bp, x)
-    bd_before = snapshot(bp, BD_KEYS)
+    for trial in range(N_TRIALS):
+        torch.manual_seed(trial)
+        hidden = torch.randn(1, T, D)
 
-    optimizer = torch.optim.Adam(bp.parameters(), lr=0.01)
-    bp.train()
+        n_existing = (trial % 6) + 1
+        spacing = T // (n_existing + 1)
+        existing = [(i + 1) * spacing for i in range(n_existing)]
 
-    first_loss = None
-    for step in range(steps):
-        optimizer.zero_grad()
-        pooled, num_b, probs = bp(x)
-        loss = pooled.pow(2).mean()
+        all_pts = [0] + sorted(existing) + [T - 1]
+        gaps = [(all_pts[i + 1] - all_pts[i], (all_pts[i] + all_pts[i + 1]) // 2)
+                for i in range(len(all_pts) - 1)]
+        new_pos = max(gaps)[1]
+
+        prob = torch.tensor(0.3, requires_grad=True)
+        boundaries = torch.zeros(1, T)
+        for ep in existing:
+            boundaries[0, ep] = 1.0
+        hard = (prob > 0.5).float()
+        boundaries[0, new_pos] = hard - prob.detach() + prob
+        boundaries[0, -1] = 1.0
+
+        pooled = mean_pool(boundaries, hidden)
+        if pooled.shape[1] == 0:
+            continue
+        seg_ids = (boundaries.cumsum(1) - boundaries).long().clamp(
+            0, pooled.shape[1] - 1)
+        recon = torch.gather(
+            pooled, 1, seg_ids.unsqueeze(-1).expand(-1, -1, D))
+        loss = (recon - hidden).pow(2).mean()
         loss.backward()
-        optimizer.step()
-        if first_loss is None:
-            first_loss = loss.item()
-        if step % 100 == 0:
-            ec, emp = eval_stats(bp, x)
-            print(f"  Step {step:4d}: boundaries={ec:.0f}  "
-                  f"mean_prob={emp:.4f}  loss={loss.item():.6f}")
+        grad = prob.grad.item()
 
-    final_count, final_mp = eval_stats(bp, x)
-    bd_change = max_change(bd_before, snapshot(bp, BD_KEYS))
-    loss_decreased = loss.item() < first_loss * 0.8
+        b_with = torch.zeros(1, T)
+        for ep in existing:
+            b_with[0, ep] = 1.0
+        b_with[0, new_pos] = 1.0
+        b_with[0, -1] = 1.0
+        p_w = mean_pool(b_with, hidden)
+        si_w = (b_with.cumsum(1) - b_with).long().clamp(
+            0, max(p_w.shape[1] - 1, 0))
+        loss_with = (torch.gather(
+            p_w, 1, si_w.unsqueeze(-1).expand(-1, -1, D)
+        ) - hidden).pow(2).mean().item()
 
-    print()
-    print(f"  Boundary prob:       {init_mp:.4f} -> {final_mp:.4f}  "
-          f"(delta={final_mp - init_mp:+.6f})")
-    print(f"  Boundary count:      {init_count:.0f} -> {final_count:.0f}")
-    print(f"  BD param max change: {bd_change:.2e}")
-    print(f"  Loss:                {first_loss:.6f} -> {loss.item():.6f}  "
-          f"({'decreased' if loss_decreased else 'did NOT decrease'})")
+        b_without = torch.zeros(1, T)
+        for ep in existing:
+            b_without[0, ep] = 1.0
+        b_without[0, -1] = 1.0
+        p_wo = mean_pool(b_without, hidden)
+        si_wo = (b_without.cumsum(1) - b_without).long().clamp(
+            0, max(p_wo.shape[1] - 1, 0))
+        loss_without = (torch.gather(
+            p_wo, 1, si_wo.unsqueeze(-1).expand(-1, -1, D)
+        ) - hidden).pow(2).mean().item()
 
-    prob_delta = abs(final_mp - init_mp)
-    count_dropped = final_count < init_count * 0.7
-    return prob_delta, bd_change, count_dropped, "fewer"
+        adding_helps = loss_with < loss_without
+
+        if abs(grad) < 1e-12:
+            zero_grad += 1
+        elif (grad < 0) == adding_helps:
+            aligned += 1
+        else:
+            misaligned += 1
+
+    total_nonzero = aligned + misaligned
+    accuracy = 100 * aligned / total_nonzero if total_nonzero > 0 else 0
+
+    print(f"  {N_TRIALS} trials:")
+    print(f"    Agrees:    {aligned}")
+    print(f"    Disagrees: {misaligned}")
+    print(f"    Zero:      {zero_grad}")
+    print(f"    Accuracy:  {accuracy:.1f}%")
+
+    return accuracy
 
 
 # ──────────────────────────────────────────────────────────────────────
-# Experiment 2b: More boundaries would help
+# Experiment 2: Downstream loss only (frozen upstream)
 # ──────────────────────────────────────────────────────────────────────
 
-def experiment_2b(x, steps=500):
+def experiment_2(steps=2000):
+    """
+    Reconstruction loss with FROZEN upstream weights.
+    Only the boundary MLP can change.
+    """
     print()
     print("=" * 70)
-    print("EXPERIMENT 2b: Downstream loss REWARDS MORE boundaries")
+    print("EXPERIMENT 2: Downstream loss only (upstream FROZEN)")
     print("=" * 70)
-    print("Same init as 2a (init_bias=0.0, ~50% boundary rate).")
-    print("Loss = reconstruction error (pooled repeated to frames vs original).")
-    print("More segments = better reconstruction = lower loss.")
-    print(f"If gradient worked, boundary count would RISE over {steps} steps.\n")
+    print()
+    print("  Reconstruction loss. Upstream frozen — only boundary MLP learns.")
+    print(f"  Optimal: ~{SIMPLE_TARGET:.0f}b for simple,"
+          f" ~{COMPLEX_TARGET:.0f}b for complex.")
+    print()
 
-    D = x.shape[2]
-    B = x.shape[0]
-    T = x.shape[1]
-    bp = MinimalBoundaryPredictor(input_dim=D, temp=0.5, init_bias=0.0)
+    torch.manual_seed(42)
+    bp = MinimalBP(input_dim=D, temp=0.5, init_bias=0.0)
 
-    init_count, init_mp = eval_stats(bp, x)
-    bd_before = snapshot(bp, BD_KEYS)
+    # Freeze upstream
+    bp.upstream.weight.requires_grad = False
 
-    optimizer = torch.optim.Adam(bp.parameters(), lr=0.01)
-    bp.train()
+    optimizer = torch.optim.Adam(
+        [p for p in bp.parameters() if p.requires_grad], lr=0.003)
 
-    first_loss = None
     for step in range(steps):
+        x, _ = make_batch()
         optimizer.zero_grad()
-        pooled, num_b, probs = bp(x)
-
-        # Reconstruct: get segment IDs from boundaries, gather pooled per frame
+        pooled, boundaries, probs, soft = bp(x)
+        n_seg = pooled.shape[1]
+        if n_seg == 0:
+            continue
+        seg_ids = (boundaries.cumsum(1) - boundaries).long().clamp(
+            0, n_seg - 1)
         hidden = bp.upstream(x)
-        boundaries, _ = bp._sample_boundaries(bp._compute_probs(hidden))
-        if (boundaries.sum(dim=1) == 0).any():
-            idx = (boundaries.sum(dim=1) == 0).nonzero(as_tuple=True)[0]
-            boundaries[idx, -1] = 1.0
-        seg_ids = (boundaries.cumsum(dim=1) - boundaries).long()
-        seg_ids_clamped = seg_ids.clamp(0, pooled.shape[1] - 1)
-        reconstructed = torch.gather(
-            pooled, 1,
-            seg_ids_clamped.unsqueeze(-1).expand(-1, -1, D)
-        )
-        loss = (reconstructed - hidden.detach()).pow(2).mean()
+        recon = torch.gather(
+            pooled, 1, seg_ids.unsqueeze(-1).expand(-1, -1, D))
+        loss = (recon - hidden.detach()).pow(2).mean()
         loss.backward()
         optimizer.step()
+        if step % 400 == 0:
+            print_rates(step, loss.item(), bp, x)
 
-        if first_loss is None:
-            first_loss = loss.item()
-        if step % 100 == 0:
-            ec, emp = eval_stats(bp, x)
-            print(f"  Step {step:4d}: boundaries={ec:.0f}  "
-                  f"mean_prob={emp:.4f}  loss={loss.item():.6f}")
-
-    final_count, final_mp = eval_stats(bp, x)
-    bd_change = max_change(bd_before, snapshot(bp, BD_KEYS))
+    x, _ = make_batch()
+    counts, mps = eval_boundary_rate(bp, x)
+    sr = mps[:B // 2].mean().item()
+    cr = mps[B // 2:].mean().item()
+    sc = counts[:B // 2].mean().item()
+    cc = counts[B // 2:].mean().item()
+    diff = cr - sr
 
     print()
-    print(f"  Boundary prob:       {init_mp:.4f} -> {final_mp:.4f}  "
-          f"(delta={final_mp - init_mp:+.6f})")
-    print(f"  Boundary count:      {init_count:.0f} -> {final_count:.0f}")
-    print(f"  BD param max change: {bd_change:.2e}")
-    print(f"  Loss:                {first_loss:.6f} -> {loss.item():.6f}")
-
-    prob_delta = abs(final_mp - init_mp)
-    count_rose = final_count > init_count * 1.3
-    return prob_delta, bd_change, count_rose, "more"
+    print(f"  Final: simple={sr:.4f} ({sc:.0f}b)  "
+          f"complex={cr:.4f} ({cc:.0f}b)  diff={diff:+.4f}")
+    return diff
 
 
 # ──────────────────────────────────────────────────────────────────────
-# Experiment 3: Direct loss on probs (control)
+# Experiment 3: Binomial loss with per-sample targets
 # ──────────────────────────────────────────────────────────────────────
 
-def experiment_3(x, steps=500):
+def experiment_3(steps=2000):
     print()
     print("=" * 70)
-    print("EXPERIMENT 3: Direct loss on boundary probs (control)")
+    print("EXPERIMENT 3: Binomial loss with per-sample targets")
     print("=" * 70)
-    print(f"Training for {steps} steps with loss = (mean_prob - 0.05)^2.")
-    print("Direct gradient to boundary MLP. Count SHOULD converge.\n")
+    print()
+    print(f"  SIMPLE target: {SIMPLE_TARGET:.0f} boundaries")
+    print(f"  COMPLEX target: {COMPLEX_TARGET:.0f} boundaries")
+    print()
 
-    D = x.shape[2]
-    T = x.shape[1]
-    bp = MinimalBoundaryPredictor(input_dim=D, temp=0.5, init_bias=0.0)
-
-    init_count, init_mp = eval_stats(bp, x)
-
-    optimizer = torch.optim.Adam(bp.parameters(), lr=0.01)
-    bp.train()
-
-    target_rate = 0.05
+    torch.manual_seed(42)
+    bp = MinimalBP(input_dim=D, temp=0.5, init_bias=0.0)
+    optimizer = torch.optim.Adam(bp.parameters(), lr=0.003)
 
     for step in range(steps):
+        x, targets = make_batch()
         optimizer.zero_grad()
-        hidden = bp.upstream(x)
-        probs = bp._compute_probs(hidden)
-        loss = (probs.mean() - target_rate).pow(2)
+        pooled, boundaries, probs, soft = bp(x)
+        per_sample_count = boundaries.sum(dim=1)
+        total_positions = torch.tensor(float(T)).expand(B)
+        loss = binomial_loss(
+            per_sample_count, total_positions, targets).mean()
         loss.backward()
         optimizer.step()
+        if step % 400 == 0:
+            print_rates(step, loss.item(), bp, x)
 
-        if step % 100 == 0:
-            ec, emp = eval_stats(bp, x)
-            print(f"  Step {step:4d}: boundaries={ec:.0f}  "
-                  f"mean_prob={emp:.4f}  loss={loss.item():.6f}")
-
-    final_count, final_mp = eval_stats(bp, x)
+    x, targets = make_batch()
+    counts, mps = eval_boundary_rate(bp, x)
+    sr = mps[:B // 2].mean().item()
+    cr = mps[B // 2:].mean().item()
+    sc = counts[:B // 2].mean().item()
+    cc = counts[B // 2:].mean().item()
+    diff = cr - sr
 
     print()
-    print(f"  Boundary prob:  {init_mp:.4f} -> {final_mp:.4f}  "
-          f"(target={target_rate:.4f})")
-    print(f"  Boundary count: {init_count:.0f} -> {final_count:.0f}  "
-          f"(target ~{target_rate * T:.0f} per sample)")
+    print(f"  Final: simple={sr:.4f} ({sc:.0f}b, target={SIMPLE_TARGET:.0f})  "
+          f"complex={cr:.4f} ({cc:.0f}b, target={COMPLEX_TARGET:.0f})  "
+          f"diff={diff:+.4f}")
+    return diff
 
-    prob_delta = abs(final_mp - init_mp)
-    moved = abs(final_mp - target_rate) < abs(init_mp - target_rate)
-    ok = prob_delta > 0.05 and moved
+
+# ──────────────────────────────────────────────────────────────────────
+# Experiment 4: Both losses
+# ──────────────────────────────────────────────────────────────────────
+
+def experiment_4(steps=2000):
     print()
-    if ok:
-        print(f"  PASS: Direct gradient changed probs by {prob_delta:.4f}.")
-        print(f"        The MLP CAN learn boundary counts with direct signal.")
-    else:
-        print(f"  FAIL: Probs didn't move enough ({prob_delta:.4f})")
-    return ok
+    print("=" * 70)
+    print("EXPERIMENT 4: Binomial + downstream loss")
+    print("=" * 70)
+    print()
+    print(f"  SIMPLE target: {SIMPLE_TARGET:.0f} boundaries")
+    print(f"  COMPLEX target: {COMPLEX_TARGET:.0f} boundaries")
+    print(f"  Loss = reconstruction + binomial")
+    print()
+
+    torch.manual_seed(42)
+    bp = MinimalBP(input_dim=D, temp=0.5, init_bias=0.0)
+    optimizer = torch.optim.Adam(bp.parameters(), lr=0.003)
+
+    for step in range(steps):
+        x, targets = make_batch()
+        optimizer.zero_grad()
+        pooled, boundaries, probs, soft = bp(x)
+        n_seg = pooled.shape[1]
+        if n_seg == 0:
+            continue
+        seg_ids = (boundaries.cumsum(1) - boundaries).long().clamp(
+            0, n_seg - 1)
+        hidden = bp.upstream(x)
+        recon = torch.gather(
+            pooled, 1, seg_ids.unsqueeze(-1).expand(-1, -1, D))
+        recon_loss = (recon - hidden.detach()).pow(2).mean()
+        per_sample_count = boundaries.sum(dim=1)
+        total_positions = torch.tensor(float(T)).expand(B)
+        bp_loss = binomial_loss(
+            per_sample_count, total_positions, targets).mean()
+        loss = recon_loss + bp_loss
+        loss.backward()
+        optimizer.step()
+        if step % 400 == 0:
+            print_rates(step, loss.item(), bp, x)
+
+    x, targets = make_batch()
+    counts, mps = eval_boundary_rate(bp, x)
+    sr = mps[:B // 2].mean().item()
+    cr = mps[B // 2:].mean().item()
+    sc = counts[:B // 2].mean().item()
+    cc = counts[B // 2:].mean().item()
+    diff = cr - sr
+
+    print()
+    print(f"  Final: simple={sr:.4f} ({sc:.0f}b, target={SIMPLE_TARGET:.0f})  "
+          f"complex={cr:.4f} ({cc:.0f}b, target={COMPLEX_TARGET:.0f})  "
+          f"diff={diff:+.4f}")
+    return diff
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -354,73 +435,57 @@ def experiment_3(x, steps=500):
 # ──────────────────────────────────────────────────────────────────────
 
 def main():
-    torch.manual_seed(42)
-
-    D = 64
-    T = 40
-    B = 4
-
-    x = torch.randn(B, T, D)
-
     print()
-    print("Can downstream gradients change boundary COUNTS")
-    print("through sampling + mean pooling (using common() from utils.py)?")
-    print(f"Setup: B={B}, T={T}, D={D}, temp=0.5")
+    print("Can the boundary predictor learn per-sample adaptive compression?")
+    print(f"SIMPLE = piecewise constant ({SIMPLE_TARGET:.0f} segments)")
+    print(f"COMPLEX = random noise (needs {COMPLEX_TARGET:.0f}+ boundaries)")
+    print(f"Boundary detector: per-token MLP (no inductive bias)")
     print()
 
-    bd_zero, bd_nonzero = experiment_1(x.clone())
-
-    r2a_prob, r2a_bd, r2a_moved, _ = experiment_2a(x.clone())
-    r2b_prob, r2b_bd, r2b_moved, _ = experiment_2b(x.clone())
-    r3 = experiment_3(x.clone())
+    accuracy = experiment_1()
+    diff_downstream = experiment_2()
+    diff_binomial = experiment_3()
+    diff_both = experiment_4()
 
     print()
     print("=" * 70)
     print("SUMMARY")
     print("=" * 70)
 
-    print(f"\n  Exp 1  (Gradient inspection):")
-    if bd_zero:
-        print(f"    Boundary MLP grad = ZERO from downstream loss")
-    else:
-        print(f"    Boundary MLP grad = NONZERO from downstream loss!")
+    print(f"""
+  Exp 1 (Gradient direction):
+    Accuracy: {accuracy:.1f}%  {"← random chance" if accuracy < 55 else ""}
 
-    print(f"\n  Exp 2a (Wants fewer boundaries):")
-    print(f"    Prob delta: {r2a_prob:.6f}, BD param change: {r2a_bd:.2e}, "
-          f"Count dropped: {r2a_moved}")
+  Exp 2 (Downstream only, upstream frozen):
+    Rate diff: {diff_downstream:+.4f}  {"← no adaptation" if diff_downstream < 0.03 else "← adapted!"}
 
-    print(f"\n  Exp 2b (Wants more boundaries):")
-    print(f"    Prob delta: {r2b_prob:.6f}, BD param change: {r2b_bd:.2e}, "
-          f"Count rose: {r2b_moved}")
+  Exp 3 (Binomial, per-sample targets):
+    Rate diff: {diff_binomial:+.4f}  {"← no adaptation" if abs(diff_binomial) < 0.03 else "← adapted!"}
 
-    print(f"\n  Exp 3  (Direct prob loss):  {'PASS' if r3 else 'FAIL'}")
+  Exp 4 (Binomial + downstream):
+    Rate diff: {diff_both:+.4f}  {"← no adaptation" if abs(diff_both) < 0.03 else "← adapted!"}""")
 
-    # Determine overall result
-    can_change_count = r2a_moved or r2b_moved or bd_nonzero
+    downstream_fails = diff_downstream < 0.03  # must be positive (complex > simple)
+    binomial_works = diff_binomial > 0.03
 
     print()
-    if not can_change_count and r3:
-        print("CONCLUSION: Downstream loss CANNOT change boundary counts.")
-        print()
-        print("  Neither direction works:")
-        print("  - Loss wanting fewer boundaries: count unchanged (2a)")
-        print("  - Loss wanting more boundaries:  count unchanged (2b)")
-        print("  - Not a collapse — opposite losses, same result: no movement.")
-        print()
-        print("  Only a direct loss on probs (exp 3) can change count.")
-    elif can_change_count:
-        print("CONCLUSION: Downstream loss CAN influence boundary counts!")
-        print()
-        if bd_nonzero:
-            print("  Gradient inspection shows nonzero gradient to boundary MLP.")
-        if r2a_moved:
-            print("  Count dropped when loss wanted fewer boundaries.")
-        if r2b_moved:
-            print("  Count rose when loss wanted more boundaries.")
-    else:
-        print("CONCLUSION: Mixed results — needs further investigation.")
+    if downstream_fails and binomial_works:
+        print("  CONCLUSION:")
+        print("  Downstream loss cannot teach adaptive compression — gradient")
+        print("  through cumsum + soft_mask + pooling is random (exp 1).")
+        print("  Binomial loss with per-sample targets CAN.")
+    elif downstream_fails and not binomial_works:
+        print("  CONCLUSION:")
+        print("  Neither loss achieves adaptive compression with a pointwise MLP.")
+        print("  The MLP processes each token independently and cannot distinguish")
+        print("  which sample a token belongs to. Per-sample targets require an")
+        print("  architecture that sees inter-token structure (e.g. adjacent-frame")
+        print("  comparison) to differentiate simple from complex inputs.")
+    elif not downstream_fails:
+        print("  CONCLUSION:")
+        print("  Downstream loss CAN drive adaptive compression.")
 
-    return 0 if (not can_change_count and r3) else 1
+    return 0
 
 
 if __name__ == "__main__":
