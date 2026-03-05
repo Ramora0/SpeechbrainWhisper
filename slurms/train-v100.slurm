@@ -14,12 +14,19 @@ set -euo pipefail
 
 if [[ $# -lt 1 ]]; then
   echo "Usage:"
-  echo "  sbatch [--time=H:00:00] train.slurm <compression_name>"
-  echo "  sbatch [--time=H:00:00] train.slurm /full/path/to/hparams.yaml"
+  echo "  sbatch [--time=H:00:00] train-v100.slurm [--raw] <compression_name>"
+  echo "  sbatch [--time=H:00:00] train-v100.slurm [--raw] /full/path/to/hparams.yaml"
   echo "Examples:"
-  echo "  sbatch --time=8:00:00 train.slurm 2x_5-2x"
-  echo "  sbatch train.slurm hparams/bp/2x_5-2x.yaml"
+  echo "  sbatch --time=8:00:00 slurms/train-v100.slurm 2x_5-2x"
+  echo "  sbatch slurms/train-v100.slurm --raw hparams/large/og.yaml"
   exit 1
+fi
+
+# Check for --raw flag
+TRAIN_SCRIPT="pretrain.py"
+if [[ "$1" == "--raw" ]]; then
+  TRAIN_SCRIPT="pretrain_raw.py"
+  shift
 fi
 
 ARG1="$1"
@@ -39,6 +46,7 @@ fi
 
 echo "JobID: ${SLURM_JOB_ID}"
 echo "Node: ${SLURM_NODELIST}"
+echo "Script: ${TRAIN_SCRIPT}"
 echo "Hparams: ${HPARAMS_PATH}"
 
 module purge
@@ -52,4 +60,4 @@ rsync -a --info=progress2 /fs/scratch/PAS2836/lees_stuff/librispeechbrain/LibriS
 rsync -a --info=progress2 /fs/scratch/PAS2836/lees_stuff/librispeechbrain/data_manifests/ "$TMPDIR/data_manifests/"
 
 source .v100/bin/activate
-python pretrain.py "${HPARAMS_PATH}" "$@"
+python "${TRAIN_SCRIPT}" "${HPARAMS_PATH}" "$@"
