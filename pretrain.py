@@ -349,46 +349,46 @@ class ASR(sb.core.Brain):
             + (1 - self.hparams.ctc_weight) * loss_seq
         )
 
-        adaptive = getattr(self.hparams, 'adaptive_boundary_budget', False)
-        if adaptive and stage == sb.Stage.TRAIN:
-            budget_weight = self.hparams.boundary_predictor_loss_weight
-            nudge_strength = getattr(self.hparams, 'nudge_strength', 0.5)
-
-            # --- Budget loss: batch-level binomial ---
-            batch_boundaries = self.bp_num_boundaries_per_sample.sum()
-            batch_positions = self.bp_total_positions_per_sample.sum()
-            prior = self.hparams.boundary_predictor_prior
-            batch_target = (self.bp_total_positions_per_sample * prior).sum()
-            budget_loss = binomial_loss_from_target_counts(
-                batch_boundaries.unsqueeze(0),
-                batch_positions.unsqueeze(0),
-                batch_target.unsqueeze(0),
-            ).squeeze(0)
-
-            # --- Nudge loss: per-sample ASR efficiency ---
-            # Compute per-sample ASR loss (reduction="batch" returns (B,))
-            loss_seq_persample = self.hparams.seq_cost_persample(
-                p_seq, tokens_eos, length=tokens_eos_lens
-            )
-            loss_ctc_persample = self.hparams.ctc_cost_persample(
-                p_ctc, tokens, enc_lens, tokens_lens
-            )
-            loss_asr_persample = (
-                self.hparams.ctc_weight * loss_ctc_persample
-                + (1 - self.hparams.ctc_weight) * loss_seq_persample
-            ).detach()
-
-            efficiency = loss_asr_persample / self.bp_num_boundaries_per_sample.detach().clamp(min=1)
-            advantage = efficiency / efficiency.mean().clamp(min=1e-8) - 1.0
-            nudge_loss = nudge_strength * (advantage * -self.bp_probs.sum(dim=1)).mean()
-
-            loss = loss_asr + budget_weight * budget_loss + nudge_loss
-            print(f"[Adaptive] budget_loss: {budget_loss.item():.6f}, nudge_loss: {nudge_loss.item():.6f}, loss_asr: {loss_asr.item():.4f}")
-        else:
-            loss = (
-                loss_asr
-                + self.hparams.boundary_predictor_loss_weight * loss_boundary
-            )
+        # adaptive = getattr(self.hparams, 'adaptive_boundary_budget', False)
+        # if adaptive and stage == sb.Stage.TRAIN:
+        #     budget_weight = self.hparams.boundary_predictor_loss_weight
+        #     nudge_strength = getattr(self.hparams, 'nudge_strength', 0.5)
+        #
+        #     # --- Budget loss: batch-level binomial ---
+        #     batch_boundaries = self.bp_num_boundaries_per_sample.sum()
+        #     batch_positions = self.bp_total_positions_per_sample.sum()
+        #     prior = self.hparams.boundary_predictor_prior
+        #     batch_target = (self.bp_total_positions_per_sample * prior).sum()
+        #     budget_loss = binomial_loss_from_target_counts(
+        #         batch_boundaries.unsqueeze(0),
+        #         batch_positions.unsqueeze(0),
+        #         batch_target.unsqueeze(0),
+        #     ).squeeze(0)
+        #
+        #     # --- Nudge loss: per-sample ASR efficiency ---
+        #     # Compute per-sample ASR loss (reduction="batch" returns (B,))
+        #     loss_seq_persample = self.hparams.seq_cost_persample(
+        #         p_seq, tokens_eos, length=tokens_eos_lens
+        #     )
+        #     loss_ctc_persample = self.hparams.ctc_cost_persample(
+        #         p_ctc, tokens, enc_lens, tokens_lens
+        #     )
+        #     loss_asr_persample = (
+        #         self.hparams.ctc_weight * loss_ctc_persample
+        #         + (1 - self.hparams.ctc_weight) * loss_seq_persample
+        #     ).detach()
+        #
+        #     efficiency = loss_asr_persample / self.bp_num_boundaries_per_sample.detach().clamp(min=1)
+        #     advantage = efficiency / efficiency.mean().clamp(min=1e-8) - 1.0
+        #     nudge_loss = nudge_strength * (advantage * -self.bp_probs.sum(dim=1)).mean()
+        #
+        #     loss = loss_asr + budget_weight * budget_loss + nudge_loss
+        #     print(f"[Adaptive] budget_loss: {budget_loss.item():.6f}, nudge_loss: {nudge_loss.item():.6f}, loss_asr: {loss_asr.item():.4f}")
+        # else:
+        loss = (
+            loss_asr
+            + self.hparams.boundary_predictor_loss_weight * loss_boundary
+        )
 
         if stage != sb.Stage.TRAIN:
             current_epoch = self.hparams.epoch_counter.current
