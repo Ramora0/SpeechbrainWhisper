@@ -631,6 +631,9 @@ class BoundaryPredictor2(nn.Module):
             shortened_lengths,
             boundary_cv,
             boundary_adjacent_pct,
+            probs,
+            num_boundaries_per_sample,
+            actual_lens.float(),
         )
 
     def calc_loss_target_counts(
