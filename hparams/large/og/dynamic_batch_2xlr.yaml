@@ -73,8 +73,8 @@ n_mels: 80
 win_length: 32
 
 dynamic_batching: True
-max_batch_length_train: 600
-max_batch_length_val: 300
+max_batch_length_train: 300
+max_batch_length_val: 200
 num_bucket: 200
 shuffle: True
 batch_ordering: random
