@@ -149,7 +149,7 @@ ctc_weight_decode: 0.40
 boundary_predictor_prior: 0.5
 boundary_predictor_temp: 1.0
 boundary_predictor_loss_weight: 1.0
-adaptive_boundary_budget: True
+adaptive_boundary_budget: False
 nudge_strength: 0.5
 
 # Prior-based boundary targets (not phoneme-based)
