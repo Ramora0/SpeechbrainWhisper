@@ -142,16 +142,15 @@ class ASR(sb.core.Brain):
         if flags.PRINT_NAN_INF:
             print(
                 f"[DEBUG] After reshape: enc has NaN: {torch.isnan(enc).any()}, has Inf: {torch.isinf(enc).any()}")
-        if torch.isnan(enc).any() or torch.isinf(enc).any():
-            if flags.PRINT_NAN_INF:
+        if flags.PRINT_NAN_INF:
+            if torch.isnan(enc).any() or torch.isinf(enc).any():
                 print(f"[DEBUG] enc stats: min={enc[~torch.isnan(enc) & ~torch.isinf(enc)].min() if (~torch.isnan(enc) & ~torch.isinf(enc)).any() else 'N/A'}, "
                       f"max={enc[~torch.isnan(enc) & ~torch.isinf(enc)].max() if (~torch.isnan(enc) & ~torch.isinf(enc)).any() else 'N/A'}")
                 print(
                     f"[DEBUG] Number of NaN values: {torch.isnan(enc).sum()}, Inf values: {torch.isinf(enc).sum()}")
-            # Check CNN parameters
-            for name, param in self.modules.CNN.named_parameters():
-                if torch.isnan(param).any() or torch.isinf(param).any():
-                    if flags.PRINT_NAN_INF:
+                # Check CNN parameters
+                for name, param in self.modules.CNN.named_parameters():
+                    if torch.isnan(param).any() or torch.isinf(param).any():
                         print(
                             f"[DEBUG] CNN parameter {name} has NaN: {torch.isnan(param).any()}, Inf: {torch.isinf(param).any()}")
 
@@ -524,21 +523,21 @@ class ASR(sb.core.Brain):
     def on_fit_batch_end(self, batch, outputs, loss, should_step):
         """At the end of the optimizer step, apply noam annealing."""
         if should_step:
-            # Check for NaN/Inf in gradients before optimizer step
-            for name, param in self.modules.named_parameters():
-                if param.grad is not None:
-                    if torch.isnan(param.grad).any() or torch.isinf(param.grad).any():
-                        if flags.PRINT_NAN_INF:
+            if flags.PRINT_NAN_INF:
+                # Check for NaN/Inf in gradients before optimizer step
+                for name, param in self.modules.named_parameters():
+                    if param.grad is not None:
+                        if torch.isnan(param.grad).any() or torch.isinf(param.grad).any():
                             print(
                                 f"[DEBUG] Gradient issue in {name}: NaN: {torch.isnan(param.grad).any()}, Inf: {torch.isinf(param.grad).any()}")
                             print(f"[DEBUG] Grad norm: {param.grad.norm()}")
 
-            # Check for NaN/Inf in parameters after optimizer step
             self.hparams.noam_annealing(self.optimizer)
 
-            for name, param in self.modules.named_parameters():
-                if torch.isnan(param).any() or torch.isinf(param).any():
-                    if flags.PRINT_NAN_INF:
+            if flags.PRINT_NAN_INF:
+                # Check for NaN/Inf in parameters after optimizer step
+                for name, param in self.modules.named_parameters():
+                    if torch.isnan(param).any() or torch.isinf(param).any():
                         print(
                             f"[DEBUG] Parameter corrupted after optimizer step: {name}")
 
