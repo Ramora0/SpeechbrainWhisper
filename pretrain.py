@@ -523,6 +523,22 @@ class ASR(sb.core.Brain):
     def on_fit_batch_end(self, batch, outputs, loss, should_step):
         """At the end of the optimizer step, apply noam annealing."""
         if should_step:
+            # Log gradient norms for boundary-decision params vs pooling params
+            bp = self.modules.BoundaryPredictor
+            boundary_grad_norms = []
+            pooling_grad_norms = []
+            for name, param in bp.named_parameters():
+                if param.grad is None:
+                    continue
+                gnorm = param.grad.norm().item()
+                if any(k in name for k in ['boundary_mlp', 'q_proj', 'k_proj', 'similarity_bias']):
+                    boundary_grad_norms.append(gnorm)
+                elif any(k in name for k in ['pool_', 'learned_query']):
+                    pooling_grad_norms.append(gnorm)
+            bd_norm = sum(boundary_grad_norms) / len(boundary_grad_norms) if boundary_grad_norms else 0.0
+            pl_norm = sum(pooling_grad_norms) / len(pooling_grad_norms) if pooling_grad_norms else 0.0
+            print(f"[BP grad] boundary_params={bd_norm:.2e}  pooling_params={pl_norm:.2e}")
+
             if flags.PRINT_NAN_INF:
                 # Check for NaN/Inf in gradients before optimizer step
                 for name, param in self.modules.named_parameters():
