@@ -169,6 +169,9 @@ class BoundaryPredictor3(nn.Module):
 
         # Step 1: Compute foo via cumsum (gradient-preserving)
         foo = common_cumsum(boundaries)  # B x L x S
+        if flags.PRINT_NAN_INF and foo is not None:
+            if torch.isnan(foo).any() or torch.isinf(foo).any():
+                print(f"[BP3 _attention_pooling] NaN/Inf in foo after common_cumsum")
 
         if flags.PRINT_FLOW:
             print(f"[BoundaryPredictor3.py] After common_cumsum():")
@@ -228,6 +231,9 @@ class BoundaryPredictor3(nn.Module):
         # Step 5: Compute attention scores
         attn_scores = torch.einsum(
             'bshd,blhd->bhsl', queries, keys) * self.pool_scale  # (B, H, S, L)
+        if flags.PRINT_NAN_INF:
+            if torch.isnan(attn_scores).any() or torch.isinf(attn_scores).any():
+                print(f"[BP3 _attention_pooling] NaN/Inf in attn_scores before masking")
 
         # Step 6: Hard-mask out-of-segment positions with -inf
         hard_mask_transposed = hard_segment_mask.permute(
@@ -238,6 +244,9 @@ class BoundaryPredictor3(nn.Module):
         # Step 7: Softmax
         attn_weights = F.softmax(attn_scores, dim=-1)  # (B, H, S, L)
         attn_weights = torch.nan_to_num(attn_weights, nan=0.0)
+        if flags.PRINT_NAN_INF:
+            if torch.isnan(attn_weights).any() or torch.isinf(attn_weights).any():
+                print(f"[BP3 _attention_pooling] NaN/Inf in attn_weights after softmax+nan_to_num")
 
         # Step 7.5: Multiply by soft mask to enable gradient flow to boundaries
         # Values unchanged: soft_mask=1.0 at in-segment, attn_weights=0 at out-of-segment
@@ -254,6 +263,9 @@ class BoundaryPredictor3(nn.Module):
 
         # Step 10: Output projection
         pooled = self.pool_output(pooled)
+        if flags.PRINT_NAN_INF:
+            if torch.isnan(pooled).any() or torch.isinf(pooled).any():
+                print(f"[BP3 _attention_pooling] NaN/Inf in pooled output")
 
         # Ensure output maintains same dtype as input
         pooled = pooled.to(dtype=dtype)
