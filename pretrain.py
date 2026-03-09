@@ -520,42 +520,45 @@ class ASR(sb.core.Brain):
                 num_to_keep=1,
             )
 
+    def optimizers_step(self):
+        """Override to log gradient norms before zero_grad clears them."""
+        # Log gradient norms for boundary-decision params vs pooling params
+        bp = self.modules.BoundaryPredictor
+        boundary_grad_norms = []
+        pooling_grad_norms = []
+        for name, param in bp.named_parameters():
+            if param.grad is None:
+                continue
+            gnorm = param.grad.norm().item()
+            if any(k in name for k in ['boundary_mlp', 'q_proj', 'k_proj', 'similarity_bias']):
+                boundary_grad_norms.append(gnorm)
+            elif any(k in name for k in ['pool_', 'learned_query']):
+                pooling_grad_norms.append(gnorm)
+        bd_norm = sum(boundary_grad_norms) / len(boundary_grad_norms) if boundary_grad_norms else 0.0
+        pl_norm = sum(pooling_grad_norms) / len(pooling_grad_norms) if pooling_grad_norms else 0.0
+        print(f"[BP grad] boundary_params={bd_norm:.2e}  pooling_params={pl_norm:.2e}")
+
+        if flags.PRINT_NAN_INF:
+            for name, param in self.modules.named_parameters():
+                if param.grad is not None:
+                    if torch.isnan(param.grad).any() or torch.isinf(param.grad).any():
+                        print(
+                            f"[DEBUG] Gradient issue in {name}: NaN: {torch.isnan(param.grad).any()}, Inf: {torch.isinf(param.grad).any()}")
+                        print(f"[DEBUG] Grad norm: {param.grad.norm()}")
+
+        # Call parent to do the actual optimizer step + zero_grad
+        super().optimizers_step()
+
+        if flags.PRINT_NAN_INF:
+            for name, param in self.modules.named_parameters():
+                if torch.isnan(param).any() or torch.isinf(param).any():
+                    print(
+                        f"[DEBUG] Parameter corrupted after optimizer step: {name}")
+
     def on_fit_batch_end(self, batch, outputs, loss, should_step):
         """At the end of the optimizer step, apply noam annealing."""
         if should_step:
-            # Log gradient norms for boundary-decision params vs pooling params
-            bp = self.modules.BoundaryPredictor
-            boundary_grad_norms = []
-            pooling_grad_norms = []
-            for name, param in bp.named_parameters():
-                if param.grad is None:
-                    continue
-                gnorm = param.grad.norm().item()
-                if any(k in name for k in ['boundary_mlp', 'q_proj', 'k_proj', 'similarity_bias']):
-                    boundary_grad_norms.append(gnorm)
-                elif any(k in name for k in ['pool_', 'learned_query']):
-                    pooling_grad_norms.append(gnorm)
-            bd_norm = sum(boundary_grad_norms) / len(boundary_grad_norms) if boundary_grad_norms else 0.0
-            pl_norm = sum(pooling_grad_norms) / len(pooling_grad_norms) if pooling_grad_norms else 0.0
-            print(f"[BP grad] boundary_params={bd_norm:.2e}  pooling_params={pl_norm:.2e}")
-
-            if flags.PRINT_NAN_INF:
-                # Check for NaN/Inf in gradients before optimizer step
-                for name, param in self.modules.named_parameters():
-                    if param.grad is not None:
-                        if torch.isnan(param.grad).any() or torch.isinf(param.grad).any():
-                            print(
-                                f"[DEBUG] Gradient issue in {name}: NaN: {torch.isnan(param.grad).any()}, Inf: {torch.isinf(param.grad).any()}")
-                            print(f"[DEBUG] Grad norm: {param.grad.norm()}")
-
             self.hparams.noam_annealing(self.optimizer)
-
-            if flags.PRINT_NAN_INF:
-                # Check for NaN/Inf in parameters after optimizer step
-                for name, param in self.modules.named_parameters():
-                    if torch.isnan(param).any() or torch.isinf(param).any():
-                        print(
-                            f"[DEBUG] Parameter corrupted after optimizer step: {name}")
 
 
 def dataio_prepare(hparams):

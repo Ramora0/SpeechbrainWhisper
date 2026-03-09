@@ -1,492 +1,289 @@
 #!/usr/bin/env python3
 """
-Can the boundary predictor learn per-sample adaptive compression?
+Test whether BoundaryPredictor3 boundary-decision parameters receive gradients
+from a downstream loss (simulating ASR loss), independent of the binomial loss.
 
-Setup: two input classes per batch —
-  SIMPLE  = piecewise constant (few boundaries needed)
-  COMPLEX = random noise (many boundaries needed)
-
-The boundary detector is a standard per-token MLP (hidden → logit → sigmoid).
-No cosine similarity, no adjacent-frame comparison — just a pointwise
-predictor. This removes any inductive bias so that any separation between
-classes must come from the training signal.
-
-Experiments:
-  1. GRADIENT DIRECTION — When adding a boundary would help the downstream
-     loss, does the gradient through cumsum+soft_mask agree? 50% = no signal.
-
-  2. DOWNSTREAM ONLY — Train with reconstruction loss (upstream frozen).
-     The only way to reduce loss is by changing boundary count/placement.
-
-  3. BINOMIAL LOSS — Train with per-sample binomial loss (different target
-     counts for simple vs complex).
-
-  4. BOTH LOSSES — Binomial + downstream together.
-
-Uses gradient-preserving cumsum + soft_mask pooling from BoundaryPredictor2.
+When running pretrain.py with --boundary_predictor_loss_weight=0.0, we see
+zero gradients on boundary params. This test isolates the gradient flow to
+determine if the issue is in BP3's architecture or elsewhere.
 """
 
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
-import sys
+
+# Silence debug prints during test
+import flags
+flags.PRINT_FLOW = False
+flags.PRINT_DATA = False
+flags.PRINT_BP_LOSS_CHECKS = False
+flags.PRINT_NAN_INF = False
+
+from BoundaryPredictor3 import BoundaryPredictor3
 
 
-# ──────────────────────────────────────────────────────────────────────
-# common() and pooling — from BoundaryPredictor2.py
-# ──────────────────────────────────────────────────────────────────────
-
-def common(boundaries):
-    """Arithmetic segment-distance matrix (gradient-preserving)."""
-    boundaries = boundaries.clone()
-    n_segments = int(boundaries.sum(dim=-1).max().item())
-    if n_segments == 0:
-        return None
-    tmp = torch.zeros_like(boundaries).unsqueeze(2) + torch.arange(
-        start=0, end=n_segments, device=boundaries.device)
-    hh1 = boundaries.cumsum(1)
-    hh1 -= boundaries
-    foo = tmp - hh1.unsqueeze(-1)
-    return foo
+def classify_param(name):
+    """Classify a BP3 parameter as 'boundary' or 'pooling'."""
+    if any(k in name for k in ['boundary_mlp', 'q_proj', 'k_proj', 'similarity_bias']):
+        return 'boundary'
+    elif any(k in name for k in ['pool_', 'learned_query']):
+        return 'pooling'
+    return 'other'
 
 
-def mean_pool(boundaries, hidden):
-    """Gradient-preserving mean pooling via soft_mask = (1 - foo)."""
-    B, T, D = hidden.shape
-    foo = common(boundaries)
-    if foo is None:
-        return torch.zeros(B, 1, D, device=hidden.device)
-    out_of_segment = (foo.detach() != 0)
-    soft_mask = torch.where(out_of_segment, torch.zeros_like(foo), 1.0 - foo)
-    counts = soft_mask.sum(dim=1).clamp(min=1e-8)
-    seg_sum = torch.bmm(soft_mask.transpose(1, 2), hidden)
-    return seg_sum / counts.unsqueeze(-1)
+def test_gradient_flow():
+    """
+    Pass synthetic data through BP3, compute a downstream loss on the pooled
+    output (no binomial loss), and check which parameters got gradients.
+    """
+    torch.manual_seed(42)
 
+    input_dim = 64
+    batch_size = 4
+    seq_len = 40
+    prior = 0.2  # ~5x compression
 
-def binomial_loss(num_boundaries, total_positions, target_counts, eps=1e-6):
-    """Per-sample binomial loss (from loss.py)."""
-    clamped_totals = total_positions.clamp(min=1.0)
-    clamped_targets = torch.minimum(target_counts, clamped_totals)
-    target_probs = (clamped_targets / clamped_totals).clamp(min=eps, max=1 - eps)
-    dist = torch.distributions.Binomial(
-        total_count=clamped_totals, probs=target_probs)
-    return -dist.log_prob(num_boundaries) / clamped_totals
-
-
-# ──────────────────────────────────────────────────────────────────────
-# Boundary predictor: standard per-token MLP
-# ──────────────────────────────────────────────────────────────────────
-
-class MinimalBP(nn.Module):
-    def __init__(self, input_dim, temp=0.5, init_bias=0.0):
-        super().__init__()
-        self.temp = temp
-
-        # Upstream linear (simulates CNN)
-        self.upstream = nn.Linear(input_dim, input_dim, bias=False)
-        with torch.no_grad():
-            self.upstream.weight.copy_(torch.eye(input_dim))
-
-        # Per-token MLP: hidden → logit → sigmoid
-        self.boundary_mlp = nn.Sequential(
-            nn.Linear(input_dim, input_dim),
-            nn.GELU(),
-            nn.Linear(input_dim, 1),
-        )
-        with torch.no_grad():
-            self.boundary_mlp[-1].bias.fill_(init_bias)
-
-    def _compute_probs(self, hidden):
-        logits = self.boundary_mlp(hidden).squeeze(-1)  # [B, T]
-        return torch.sigmoid(logits)
-
-    def _sample(self, probs):
-        dist = torch.distributions.RelaxedBernoulli(
-            temperature=self.temp,
-            probs=probs.clamp(1e-6, 1 - 1e-6),
-        )
-        soft = dist.rsample()
-        hard = (soft > 0.5).float()
-        return hard - soft.detach() + soft, soft
-
-    def forward(self, x):
-        hidden = self.upstream(x)
-        probs = self._compute_probs(hidden)
-        boundaries, soft = self._sample(probs)
-        if (boundaries.sum(dim=1) == 0).any():
-            idx = (boundaries.sum(dim=1) == 0).nonzero(as_tuple=True)[0]
-            boundaries[idx, -1] = 1.0
-        pooled = mean_pool(boundaries, hidden)
-        return pooled, boundaries, probs, soft
-
-
-def eval_boundary_rate(bp, x):
-    """Deterministic boundary count and mean prob, per sample."""
-    bp.eval()
-    with torch.no_grad():
-        hidden = bp.upstream(x)
-        probs = bp._compute_probs(hidden)
-        count = (probs > 0.5).float().sum(dim=1)
-        mp = probs.mean(dim=1)
+    bp = BoundaryPredictor3(input_dim=input_dim, prior=prior, temp=0.5)
     bp.train()
-    return count, mp
 
+    # Synthetic input (requires_grad=False — we only care about BP param grads)
+    hidden = torch.randn(batch_size, seq_len, input_dim)
+    lengths = torch.ones(batch_size)  # full-length sequences
+    target_counts = torch.full((batch_size,), seq_len * prior)
 
-# ──────────────────────────────────────────────────────────────────────
-# Data generation
-# ──────────────────────────────────────────────────────────────────────
+    # Forward pass
+    (pooled, bp_loss, num_boundaries, total_positions,
+     shortened_lengths, boundary_cv, boundary_adjacent_pct,
+     bp_probs, bp_num_boundaries_per_sample,
+     bp_total_positions_per_sample) = bp(
+        hidden=hidden,
+        lengths=lengths,
+        target_boundary_counts=target_counts,
+    )
 
-T = 40
-D = 32
-B = 8  # 4 simple + 4 complex
-SIMPLE_TARGET = 5.0
-COMPLEX_TARGET = 15.0
-
-
-def make_batch():
-    """First B//2 = SIMPLE (piecewise constant), last B//2 = COMPLEX (random)."""
-    simple = torch.zeros(B // 2, T, D)
-    for i in range(B // 2):
-        n_segs = 5
-        seg_len = T // n_segs
-        for s in range(n_segs):
-            val = torch.randn(D) * 2.0
-            start = s * seg_len
-            end = (s + 1) * seg_len if s < n_segs - 1 else T
-            simple[i, start:end] = val
-    complex_ = torch.randn(B // 2, T, D)
-    x = torch.cat([simple, complex_], dim=0)
-    targets = torch.tensor(
-        [SIMPLE_TARGET] * (B // 2) + [COMPLEX_TARGET] * (B // 2))
-    return x, targets
-
-
-def print_rates(step, loss, bp, x):
-    counts, mps = eval_boundary_rate(bp, x)
-    sr = mps[:B // 2].mean().item()
-    cr = mps[B // 2:].mean().item()
-    sc = counts[:B // 2].mean().item()
-    cc = counts[B // 2:].mean().item()
-    print(f"  Step {step:4d}: loss={loss:.6f}  "
-          f"simple={sr:.4f} ({sc:.0f}b)  complex={cr:.4f} ({cc:.0f}b)")
-    return sr, cr
-
-
-# ──────────────────────────────────────────────────────────────────────
-# Experiment 1: Gradient direction accuracy
-# ──────────────────────────────────────────────────────────────────────
-
-def experiment_1():
-    print("=" * 70)
-    print("EXPERIMENT 1: Gradient direction accuracy")
-    print("=" * 70)
-    print()
-    print("  Does the continuous gradient through pooling correctly predict")
-    print("  whether adding a boundary reduces reconstruction loss?")
-    print("  50% = random chance = no useful signal.")
+    print(f"Input shape:  {hidden.shape}")
+    print(f"Pooled shape: {pooled.shape}")
+    print(f"Boundaries:   {num_boundaries:.0f} / {total_positions:.0f} "
+          f"= {num_boundaries/max(total_positions,1):.3f}")
+    print(f"BP loss:      {bp_loss.item():.6f}")
     print()
 
-    N_TRIALS = 1000
-    aligned = 0
-    misaligned = 0
-    zero_grad = 0
+    # =========================================================
+    # Test 1: Gradient from downstream loss only (no BP loss)
+    # =========================================================
+    print("=" * 60)
+    print("TEST 1: Downstream loss only (simulates boundary_predictor_loss_weight=0)")
+    print("=" * 60)
 
-    for trial in range(N_TRIALS):
-        torch.manual_seed(trial)
-        hidden = torch.randn(1, T, D)
+    bp.zero_grad()
+    downstream_loss = pooled.sum()  # simple surrogate for ASR loss
+    downstream_loss.backward()
 
-        n_existing = (trial % 6) + 1
-        spacing = T // (n_existing + 1)
-        existing = [(i + 1) * spacing for i in range(n_existing)]
+    print(f"\n{'Parameter':<40} {'Type':<10} {'Grad Norm':>12} {'Has Grad':>10}")
+    print("-" * 75)
 
-        all_pts = [0] + sorted(existing) + [T - 1]
-        gaps = [(all_pts[i + 1] - all_pts[i], (all_pts[i] + all_pts[i + 1]) // 2)
-                for i in range(len(all_pts) - 1)]
-        new_pos = max(gaps)[1]
-
-        prob = torch.tensor(0.3, requires_grad=True)
-        boundaries = torch.zeros(1, T)
-        for ep in existing:
-            boundaries[0, ep] = 1.0
-        hard = (prob > 0.5).float()
-        boundaries[0, new_pos] = hard - prob.detach() + prob
-        boundaries[0, -1] = 1.0
-
-        pooled = mean_pool(boundaries, hidden)
-        if pooled.shape[1] == 0:
-            continue
-        seg_ids = (boundaries.cumsum(1) - boundaries).long().clamp(
-            0, pooled.shape[1] - 1)
-        recon = torch.gather(
-            pooled, 1, seg_ids.unsqueeze(-1).expand(-1, -1, D))
-        loss = (recon - hidden).pow(2).mean()
-        loss.backward()
-        grad = prob.grad.item()
-
-        b_with = torch.zeros(1, T)
-        for ep in existing:
-            b_with[0, ep] = 1.0
-        b_with[0, new_pos] = 1.0
-        b_with[0, -1] = 1.0
-        p_w = mean_pool(b_with, hidden)
-        si_w = (b_with.cumsum(1) - b_with).long().clamp(
-            0, max(p_w.shape[1] - 1, 0))
-        loss_with = (torch.gather(
-            p_w, 1, si_w.unsqueeze(-1).expand(-1, -1, D)
-        ) - hidden).pow(2).mean().item()
-
-        b_without = torch.zeros(1, T)
-        for ep in existing:
-            b_without[0, ep] = 1.0
-        b_without[0, -1] = 1.0
-        p_wo = mean_pool(b_without, hidden)
-        si_wo = (b_without.cumsum(1) - b_without).long().clamp(
-            0, max(p_wo.shape[1] - 1, 0))
-        loss_without = (torch.gather(
-            p_wo, 1, si_wo.unsqueeze(-1).expand(-1, -1, D)
-        ) - hidden).pow(2).mean().item()
-
-        adding_helps = loss_with < loss_without
-
-        if abs(grad) < 1e-12:
-            zero_grad += 1
-        elif (grad < 0) == adding_helps:
-            aligned += 1
+    boundary_grads = []
+    pooling_grads = []
+    for name, param in bp.named_parameters():
+        ptype = classify_param(name)
+        if param.grad is not None:
+            gnorm = param.grad.norm().item()
+            has_grad = gnorm > 0
         else:
-            misaligned += 1
+            gnorm = 0.0
+            has_grad = False
+        print(f"{name:<40} {ptype:<10} {gnorm:>12.2e} {'YES' if has_grad else 'NO':>10}")
+        if ptype == 'boundary':
+            boundary_grads.append((name, gnorm))
+        elif ptype == 'pooling':
+            pooling_grads.append((name, gnorm))
 
-    total_nonzero = aligned + misaligned
-    accuracy = 100 * aligned / total_nonzero if total_nonzero > 0 else 0
+    bd_total = sum(g for _, g in boundary_grads)
+    pl_total = sum(g for _, g in pooling_grads)
+    print(f"\nBoundary param total grad norm: {bd_total:.2e}")
+    print(f"Pooling param total grad norm:  {pl_total:.2e}")
 
-    print(f"  {N_TRIALS} trials:")
-    print(f"    Agrees:    {aligned}")
-    print(f"    Disagrees: {misaligned}")
-    print(f"    Zero:      {zero_grad}")
-    print(f"    Accuracy:  {accuracy:.1f}%")
+    if bd_total == 0:
+        print("\n*** FAIL: Boundary params got ZERO gradient from downstream loss ***")
+        print("    This confirms the gradient-flow bug.")
+    else:
+        print("\n*** PASS: Boundary params got nonzero gradient from downstream loss ***")
 
-    return accuracy
-
-
-# ──────────────────────────────────────────────────────────────────────
-# Experiment 2: Downstream loss only (frozen upstream)
-# ──────────────────────────────────────────────────────────────────────
-
-def experiment_2(steps=2000):
-    """
-    Reconstruction loss with FROZEN upstream weights.
-    Only the boundary MLP can change.
-    """
+    # =========================================================
+    # Test 2: Gradient from BP loss only (for comparison)
+    # =========================================================
     print()
-    print("=" * 70)
-    print("EXPERIMENT 2: Downstream loss only (upstream FROZEN)")
-    print("=" * 70)
+    print("=" * 60)
+    print("TEST 2: BP (binomial) loss only (fresh forward pass)")
+    print("=" * 60)
+
+    bp.zero_grad()
+    hidden_t2 = torch.randn(batch_size, seq_len, input_dim)
+    (pooled_t2, bp_loss_t2, *_rest) = bp(
+        hidden=hidden_t2, lengths=lengths,
+        target_boundary_counts=target_counts,
+    )
+    bp_loss_t2.backward()
+
+    print(f"\n{'Parameter':<40} {'Type':<10} {'Grad Norm':>12}")
+    print("-" * 65)
+
+    for name, param in bp.named_parameters():
+        ptype = classify_param(name)
+        gnorm = param.grad.norm().item() if param.grad is not None else 0.0
+        print(f"{name:<40} {ptype:<10} {gnorm:>12.2e}")
+
+    # =========================================================
+    # Test 3: Trace gradient flow through intermediate tensors
+    # =========================================================
     print()
-    print("  Reconstruction loss. Upstream frozen — only boundary MLP learns.")
-    print(f"  Optimal: ~{SIMPLE_TARGET:.0f}b for simple,"
-          f" ~{COMPLEX_TARGET:.0f}b for complex.")
+    print("=" * 60)
+    print("TEST 3: Intermediate tensor gradient check")
+    print("=" * 60)
+
+    # Re-run forward with intermediate tensors retained for gradient checking
+    bp.zero_grad()
+
+    hidden2 = torch.randn(batch_size, seq_len, input_dim)
+    hidden2.requires_grad_(True)
+    lengths2 = torch.ones(batch_size)
+    target_counts2 = torch.full((batch_size,), seq_len * prior)
+
+    # Hook into internals to capture intermediates
+    intermediates = {}
+
+    def make_hook(name):
+        def hook(grad):
+            intermediates[name] = grad.norm().item()
+        return hook
+
+    # Manually trace through forward to attach hooks
+    hidden_dropped = bp.dropout(hidden2)
+    q_input = hidden_dropped[:, :-1]
+    k_input = hidden_dropped[:, 1:]
+
+    q_normed = torch.nn.functional.normalize(q_input, dim=-1, eps=1e-8)
+    k_normed = torch.nn.functional.normalize(k_input, dim=-1, eps=1e-8)
+
+    q_mlp_out = bp.boundary_mlp(q_normed)
+    q_hidden = bp.q_proj_layer(torch.nn.functional.normalize(
+        q_mlp_out + q_normed, dim=-1, eps=1e-8))
+
+    k_mlp_out = bp.boundary_mlp(k_normed)
+    k_hidden = bp.k_proj_layer(torch.nn.functional.normalize(
+        k_mlp_out + k_normed, dim=-1, eps=1e-8))
+
+    cos_sim = torch.einsum("bld,bld->bl", q_hidden, k_hidden)
+    cos_sim.register_hook(make_hook("cos_sim"))
+
+    probs = torch.clamp((1.0 - (cos_sim + bp.similarity_bias)) * 0.5, min=0.0, max=1.0)
+    probs = torch.nn.functional.pad(probs, (0, 1), value=0.0)
+    probs.register_hook(make_hook("probs"))
+
+    bernoulli = torch.distributions.relaxed_bernoulli.RelaxedBernoulli(
+        temperature=bp.temp, probs=probs)
+    soft_boundaries = bernoulli.rsample()
+    soft_boundaries.register_hook(make_hook("soft_boundaries"))
+
+    hard_samples = (soft_boundaries > 0.5).float()
+
+    # Mask based on lengths
+    boundary_seq_len = soft_boundaries.shape[1]
+    actual_lens = (lengths2 * (boundary_seq_len + 1)).long()
+    valid_lens = torch.clamp(actual_lens - 1, min=0, max=boundary_seq_len)
+    pos_idx = torch.arange(boundary_seq_len).unsqueeze(0)
+    valid_mask = (pos_idx < valid_lens.unsqueeze(1)).float()
+
+    soft_boundaries = soft_boundaries * valid_mask
+    hard_samples = hard_samples * valid_mask
+
+    needs_boundary_mask = valid_lens < boundary_seq_len
+    if needs_boundary_mask.any():
+        batch_idx = torch.arange(batch_size)[needs_boundary_mask]
+        first_padding_idx = valid_lens[needs_boundary_mask]
+        soft_boundaries[batch_idx, first_padding_idx] = 1.0
+        hard_samples[batch_idx, first_padding_idx] = 1.0
+
+    # STE
+    hard_boundaries = hard_samples - soft_boundaries.detach() + soft_boundaries
+    hard_boundaries.register_hook(make_hook("hard_boundaries"))
+
+    # Ensure at least one boundary
+    no_bd = (hard_boundaries.sum(dim=1) == 0)
+    if no_bd.any():
+        indices = no_bd.nonzero(as_tuple=True)[0]
+        vl = torch.clamp(actual_lens[indices] - 1, min=0, max=boundary_seq_len)
+        bi = torch.clamp(vl, min=0, max=boundary_seq_len - 1)
+        hard_boundaries[indices, bi] = 1.0
+
+    # Attention pooling
+    pooled2 = bp._attention_pooling(hard_boundaries, hidden2, lengths2)
+    pooled2.register_hook(make_hook("pooled"))
+
+    # Downstream loss
+    downstream_loss2 = pooled2.sum()
+    downstream_loss2.backward()
+
+    print(f"\n{'Tensor':<25} {'Grad Norm':>12}")
+    print("-" * 40)
+    for name in ["pooled", "hard_boundaries", "soft_boundaries", "probs", "cos_sim"]:
+        gnorm = intermediates.get(name, "NOT REGISTERED")
+        if isinstance(gnorm, float):
+            print(f"{name:<25} {gnorm:>12.2e}")
+        else:
+            print(f"{name:<25} {gnorm:>12}")
+
+    # Check input hidden grad too
+    if hidden2.grad is not None:
+        print(f"{'hidden (input)':<25} {hidden2.grad.norm().item():>12.2e}")
+    else:
+        print(f"{'hidden (input)':<25} {'None':>12}")
+
+    # Boundary param grads from this manual trace
+    bd_norm = 0.0
+    for name, param in bp.named_parameters():
+        if classify_param(name) == 'boundary' and param.grad is not None:
+            bd_norm += param.grad.norm().item()
+
+    print(f"\nBoundary param total grad norm (manual trace): {bd_norm:.2e}")
+    if bd_norm == 0:
+        print("*** FAIL: Still zero. Gradient is blocked somewhere. ***")
+    else:
+        print("*** PASS: Nonzero gradient through manual trace. ***")
+
+    # =========================================================
+    # Test 4: Check the specific soft_segment_mask gradient path
+    # =========================================================
     print()
+    print("=" * 60)
+    print("TEST 4: Soft segment mask gradient path (isolated)")
+    print("=" * 60)
 
-    torch.manual_seed(42)
-    bp = MinimalBP(input_dim=D, temp=0.5, init_bias=0.0)
+    # Create a simple case: boundaries = [1, 0, 1, 0] for 1 batch item
+    boundaries = torch.tensor([[1.0, 0.0, 1.0, 0.0]], requires_grad=True)
+    from BoundaryPredictor3 import common_cumsum
+    foo = common_cumsum(boundaries)
 
-    # Freeze upstream
-    bp.upstream.weight.requires_grad = False
+    if foo is not None:
+        print(f"foo shape: {foo.shape}")
+        print(f"foo values:\n{foo[0]}")
 
-    optimizer = torch.optim.Adam(
-        [p for p in bp.parameters() if p.requires_grad], lr=0.003)
+        # Build soft mask same way as BP3
+        out_of_segment = (foo.detach() != 0)
+        soft_mask = torch.where(out_of_segment, torch.zeros_like(foo), 1.0 - foo)
+        print(f"\nsoft_mask values:\n{soft_mask[0]}")
 
-    for step in range(steps):
-        x, _ = make_batch()
-        optimizer.zero_grad()
-        pooled, boundaries, probs, soft = bp(x)
-        n_seg = pooled.shape[1]
-        if n_seg == 0:
-            continue
-        seg_ids = (boundaries.cumsum(1) - boundaries).long().clamp(
-            0, n_seg - 1)
-        hidden = bp.upstream(x)
-        recon = torch.gather(
-            pooled, 1, seg_ids.unsqueeze(-1).expand(-1, -1, D))
-        loss = (recon - hidden.detach()).pow(2).mean()
-        loss.backward()
-        optimizer.step()
-        if step % 400 == 0:
-            print_rates(step, loss.item(), bp, x)
+        # Compute gradient of soft_mask.sum() w.r.t. boundaries
+        loss_mask = soft_mask.sum()
+        loss_mask.backward()
 
-    x, _ = make_batch()
-    counts, mps = eval_boundary_rate(bp, x)
-    sr = mps[:B // 2].mean().item()
-    cr = mps[B // 2:].mean().item()
-    sc = counts[:B // 2].mean().item()
-    cc = counts[B // 2:].mean().item()
-    diff = cr - sr
-
-    print()
-    print(f"  Final: simple={sr:.4f} ({sc:.0f}b)  "
-          f"complex={cr:.4f} ({cc:.0f}b)  diff={diff:+.4f}")
-    return diff
-
-
-# ──────────────────────────────────────────────────────────────────────
-# Experiment 3: Binomial loss with per-sample targets
-# ──────────────────────────────────────────────────────────────────────
-
-def experiment_3(steps=2000):
-    print()
-    print("=" * 70)
-    print("EXPERIMENT 3: Binomial loss with per-sample targets")
-    print("=" * 70)
-    print()
-    print(f"  SIMPLE target: {SIMPLE_TARGET:.0f} boundaries")
-    print(f"  COMPLEX target: {COMPLEX_TARGET:.0f} boundaries")
-    print()
-
-    torch.manual_seed(42)
-    bp = MinimalBP(input_dim=D, temp=0.5, init_bias=0.0)
-    optimizer = torch.optim.Adam(bp.parameters(), lr=0.003)
-
-    for step in range(steps):
-        x, targets = make_batch()
-        optimizer.zero_grad()
-        pooled, boundaries, probs, soft = bp(x)
-        per_sample_count = boundaries.sum(dim=1)
-        total_positions = torch.tensor(float(T)).expand(B)
-        loss = binomial_loss(
-            per_sample_count, total_positions, targets).mean()
-        loss.backward()
-        optimizer.step()
-        if step % 400 == 0:
-            print_rates(step, loss.item(), bp, x)
-
-    x, targets = make_batch()
-    counts, mps = eval_boundary_rate(bp, x)
-    sr = mps[:B // 2].mean().item()
-    cr = mps[B // 2:].mean().item()
-    sc = counts[:B // 2].mean().item()
-    cc = counts[B // 2:].mean().item()
-    diff = cr - sr
-
-    print()
-    print(f"  Final: simple={sr:.4f} ({sc:.0f}b, target={SIMPLE_TARGET:.0f})  "
-          f"complex={cr:.4f} ({cc:.0f}b, target={COMPLEX_TARGET:.0f})  "
-          f"diff={diff:+.4f}")
-    return diff
-
-
-# ──────────────────────────────────────────────────────────────────────
-# Experiment 4: Both losses
-# ──────────────────────────────────────────────────────────────────────
-
-def experiment_4(steps=2000):
-    print()
-    print("=" * 70)
-    print("EXPERIMENT 4: Binomial + downstream loss")
-    print("=" * 70)
-    print()
-    print(f"  SIMPLE target: {SIMPLE_TARGET:.0f} boundaries")
-    print(f"  COMPLEX target: {COMPLEX_TARGET:.0f} boundaries")
-    print(f"  Loss = reconstruction + binomial")
-    print()
-
-    torch.manual_seed(42)
-    bp = MinimalBP(input_dim=D, temp=0.5, init_bias=0.0)
-    optimizer = torch.optim.Adam(bp.parameters(), lr=0.003)
-
-    for step in range(steps):
-        x, targets = make_batch()
-        optimizer.zero_grad()
-        pooled, boundaries, probs, soft = bp(x)
-        n_seg = pooled.shape[1]
-        if n_seg == 0:
-            continue
-        seg_ids = (boundaries.cumsum(1) - boundaries).long().clamp(
-            0, n_seg - 1)
-        hidden = bp.upstream(x)
-        recon = torch.gather(
-            pooled, 1, seg_ids.unsqueeze(-1).expand(-1, -1, D))
-        recon_loss = (recon - hidden.detach()).pow(2).mean()
-        per_sample_count = boundaries.sum(dim=1)
-        total_positions = torch.tensor(float(T)).expand(B)
-        bp_loss = binomial_loss(
-            per_sample_count, total_positions, targets).mean()
-        loss = recon_loss + bp_loss
-        loss.backward()
-        optimizer.step()
-        if step % 400 == 0:
-            print_rates(step, loss.item(), bp, x)
-
-    x, targets = make_batch()
-    counts, mps = eval_boundary_rate(bp, x)
-    sr = mps[:B // 2].mean().item()
-    cr = mps[B // 2:].mean().item()
-    sc = counts[:B // 2].mean().item()
-    cc = counts[B // 2:].mean().item()
-    diff = cr - sr
-
-    print()
-    print(f"  Final: simple={sr:.4f} ({sc:.0f}b, target={SIMPLE_TARGET:.0f})  "
-          f"complex={cr:.4f} ({cc:.0f}b, target={COMPLEX_TARGET:.0f})  "
-          f"diff={diff:+.4f}")
-    return diff
-
-
-# ──────────────────────────────────────────────────────────────────────
-# Main
-# ──────────────────────────────────────────────────────────────────────
-
-def main():
-    print()
-    print("Can the boundary predictor learn per-sample adaptive compression?")
-    print(f"SIMPLE = piecewise constant ({SIMPLE_TARGET:.0f} segments)")
-    print(f"COMPLEX = random noise (needs {COMPLEX_TARGET:.0f}+ boundaries)")
-    print(f"Boundary detector: per-token MLP (no inductive bias)")
-    print()
-
-    accuracy = experiment_1()
-    diff_downstream = experiment_2()
-    diff_binomial = experiment_3()
-    diff_both = experiment_4()
-
-    print()
-    print("=" * 70)
-    print("SUMMARY")
-    print("=" * 70)
-
-    print(f"""
-  Exp 1 (Gradient direction):
-    Accuracy: {accuracy:.1f}%  {"← random chance" if accuracy < 55 else ""}
-
-  Exp 2 (Downstream only, upstream frozen):
-    Rate diff: {diff_downstream:+.4f}  {"← no adaptation" if diff_downstream < 0.03 else "← adapted!"}
-
-  Exp 3 (Binomial, per-sample targets):
-    Rate diff: {diff_binomial:+.4f}  {"← no adaptation" if abs(diff_binomial) < 0.03 else "← adapted!"}
-
-  Exp 4 (Binomial + downstream):
-    Rate diff: {diff_both:+.4f}  {"← no adaptation" if abs(diff_both) < 0.03 else "← adapted!"}""")
-
-    downstream_fails = diff_downstream < 0.03  # must be positive (complex > simple)
-    binomial_works = diff_binomial > 0.03
-
-    print()
-    if downstream_fails and binomial_works:
-        print("  CONCLUSION:")
-        print("  Downstream loss cannot teach adaptive compression — gradient")
-        print("  through cumsum + soft_mask + pooling is random (exp 1).")
-        print("  Binomial loss with per-sample targets CAN.")
-    elif downstream_fails and not binomial_works:
-        print("  CONCLUSION:")
-        print("  Neither loss achieves adaptive compression with a pointwise MLP.")
-        print("  The MLP processes each token independently and cannot distinguish")
-        print("  which sample a token belongs to. Per-sample targets require an")
-        print("  architecture that sees inter-token structure (e.g. adjacent-frame")
-        print("  comparison) to differentiate simple from complex inputs.")
-    elif not downstream_fails:
-        print("  CONCLUSION:")
-        print("  Downstream loss CAN drive adaptive compression.")
-
-    return 0
+        print(f"\nd(soft_mask.sum())/d(boundaries) = {boundaries.grad}")
+        if boundaries.grad is not None and boundaries.grad.abs().sum() > 0:
+            print("PASS: soft_mask carries gradient w.r.t. boundaries")
+        else:
+            print("FAIL: soft_mask does NOT carry gradient w.r.t. boundaries")
+    else:
+        print("FAIL: common_cumsum returned None (no boundaries)")
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    test_gradient_flow()
