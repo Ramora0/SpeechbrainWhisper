@@ -186,6 +186,7 @@ BoundaryPredictor: !new:BoundaryPredictor3.BoundaryPredictor3
     input_dim: 640
     prior: !ref <boundary_predictor_prior>
     temp: !ref <boundary_predictor_temp>
+    similarity_bias: -0.7
 
 # This is the TransformerLM that is used according to the Huggingface repository
 # Visit the HuggingFace model corresponding to the pretrained_lm_tokenizer_path
