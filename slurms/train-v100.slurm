@@ -7,8 +7,8 @@
 #SBATCH --constraint=48core
 #SBATCH --time=12:00:00
 #SBATCH --account=PAS2836
-#SBATCH --output=slurms/slurm-%j.out
-#SBATCH --error=slurms/slurm-%j.err
+#SBATCH --output=slurms/%x-%j.out
+#SBATCH --error=slurms/%x-%j.err
 
 set -euo pipefail
 

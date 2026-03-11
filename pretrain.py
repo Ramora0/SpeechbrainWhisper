@@ -262,6 +262,11 @@ class ASR(sb.core.Brain):
         enc_out, pred = self.modules.Transformer(
             enc, tokens_bos, enc_lens, pad_idx=self.hparams.pad_index
         )
+        if flags.PRINT_NAN_INF:
+            if torch.isnan(enc_out).any() or torch.isinf(enc_out).any():
+                print(f"[DEBUG] After Transformer: enc_out has NaN: {torch.isnan(enc_out).any()}, Inf: {torch.isinf(enc_out).any()}")
+            if torch.isnan(pred).any() or torch.isinf(pred).any():
+                print(f"[DEBUG] After Transformer: pred has NaN: {torch.isnan(pred).any()}, Inf: {torch.isinf(pred).any()}")
 
         # output layer for ctc log-probabilities
         logits = self.modules.ctc_lin(enc_out)
@@ -270,6 +275,11 @@ class ASR(sb.core.Brain):
         # output layer for seq2seq log-probabilities
         pred = self.modules.seq_lin(pred)
         p_seq = self.hparams.log_softmax(pred)
+        if flags.PRINT_NAN_INF:
+            if torch.isnan(p_ctc).any() or torch.isinf(p_ctc).any():
+                print(f"[DEBUG] p_ctc has NaN: {torch.isnan(p_ctc).any()}, Inf: {torch.isinf(p_ctc).any()}")
+            if torch.isnan(p_seq).any() or torch.isinf(p_seq).any():
+                print(f"[DEBUG] p_seq has NaN: {torch.isnan(p_seq).any()}, Inf: {torch.isinf(p_seq).any()}")
 
         # Compute outputs
         hyps = None
@@ -331,6 +341,12 @@ class ASR(sb.core.Brain):
         loss_ctc = self.hparams.ctc_cost(
             p_ctc, tokens, enc_lens, tokens_lens
         ).sum()
+
+        if flags.PRINT_NAN_INF:
+            if not torch.isfinite(loss_seq):
+                print(f"[DEBUG] loss_seq is not finite: {loss_seq.item()}")
+            if not torch.isfinite(loss_ctc):
+                print(f"[DEBUG] loss_ctc is not finite: {loss_ctc.item()}")
 
         # Add boundary predictor loss
         if stage == sb.Stage.TRAIN:
