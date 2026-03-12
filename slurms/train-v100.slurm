@@ -59,8 +59,8 @@ cd "${SLURM_SUBMIT_DIR}"
 
 mkdir -p "$TMPDIR/LibriSpeech" "$TMPDIR/data_manifests"
 
-rsync -a --info=progress2 /fs/scratch/PAS2836/lees_stuff/librispeechbrain/LibriSpeech/ "$TMPDIR/LibriSpeech/" && \
-rsync -a --info=progress2 /fs/scratch/PAS2836/lees_stuff/librispeechbrain/data_manifests/ "$TMPDIR/data_manifests/"
+rsync -a /fs/scratch/PAS2836/lees_stuff/librispeechbrain/LibriSpeech/ "$TMPDIR/LibriSpeech/" && \
+rsync -a /fs/scratch/PAS2836/lees_stuff/librispeechbrain/data_manifests/ "$TMPDIR/data_manifests/"
 
 source .v100/bin/activate
 python "${TRAIN_SCRIPT}" "${HPARAMS_PATH}" "$@"
