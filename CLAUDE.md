@@ -59,6 +59,10 @@ The `count_phonemes_batch()` function in `pretrain.py:80-91` converts transcript
 - Returns float tensor of phoneme counts per utterance
 - These counts are clamped to valid range `[1, actual_sequence_length]` before being used as targets
 
+## Running Jobs on the Cluster
+
+**IMPORTANT**: All commands that run on the cluster (sbatch, squeue, scancel, checking job output, etc.) MUST use the `mcp__slurm__run_command` MCP tool — NEVER use the local Bash tool for these. The cluster is accessed via SSH through the MCP tool. Always commit and push changes before submitting jobs with `git_pull=True`.
+
 ## Common Commands
 
 ### Training
