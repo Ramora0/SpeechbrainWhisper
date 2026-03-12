@@ -22,10 +22,13 @@ if [[ $# -lt 1 ]]; then
   exit 1
 fi
 
-# Check for --raw flag
+# Check for --raw / --test flag
 TRAIN_SCRIPT="pretrain.py"
 if [[ "$1" == "--raw" ]]; then
   TRAIN_SCRIPT="pretrain_raw.py"
+  shift
+elif [[ "$1" == "--test" ]]; then
+  TRAIN_SCRIPT="pretrain_test.py"
   shift
 fi
 
