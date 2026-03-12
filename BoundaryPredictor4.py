@@ -21,12 +21,18 @@ class BoundaryPredictor4(nn.Module):
     """
     Simplified BoundaryPredictor with per-frame MLP boundary prediction
     and mean pooling.
+
+    boundary_mode controls how boundaries are determined:
+      - "learned": MLP predicts per-frame boundary logits (default)
+      - "all": every position is a boundary (no compression, sanity check)
+      - "alternating": boundary every other position (~2x compression)
     """
 
-    def __init__(self, input_dim, prior, temp=1):
+    def __init__(self, input_dim, prior, temp=1, boundary_mode="learned"):
         super().__init__()
         self.temp = temp
         self.prior = prior
+        self.boundary_mode = boundary_mode
         self.compression_schedule = 1.0
         self.target_prior = prior
 
@@ -60,9 +66,13 @@ class BoundaryPredictor4(nn.Module):
         current_compression = start_compression + (target_compression - start_compression) * schedule
         return 1.0 / current_compression
 
+    # -------------------------------------------------------------------------
+    # Pooling
+    # -------------------------------------------------------------------------
+
     def _mean_pooling(self, boundaries, hidden):
-        """Mean pooling using cumsum-based segment assignment (a la dynamic-pooling)."""
-        batch_size, seq_len, hidden_dim = hidden.shape
+        """Mean pooling using cumsum-based segment assignment."""
+        batch_size, _, hidden_dim = hidden.shape
         device = hidden.device
         dtype = hidden.dtype
 
@@ -78,63 +88,165 @@ class BoundaryPredictor4(nn.Module):
         pooled = torch.einsum('bls,bld->bsd', bar, hidden)
         return pooled.to(dtype=dtype)
 
-    def forward(
-        self,
-        hidden,
-        lengths,
-        target_boundary_counts=None,  # unused, kept for interface compat
-        return_unreduced_boundary_loss=False,
-    ):
+    # -------------------------------------------------------------------------
+    # Boundary computation
+    # -------------------------------------------------------------------------
+
+    def _apply_length_mask(self, boundaries, lengths, seq_len, batch_size):
+        """Mask out positions beyond actual lengths and force last-valid boundary."""
+        device = boundaries.device
+        actual_lens = (lengths * seq_len).long()
+        pos_idx = torch.arange(seq_len, device=device).unsqueeze(0)
+        valid_mask = (pos_idx < actual_lens.unsqueeze(1)).float()
+
+        boundaries = boundaries * valid_mask
+
+        # Force boundary at last valid position to close the final segment
+        last_valid_idx = torch.clamp(actual_lens - 1, min=0, max=seq_len - 1)
+        batch_idx = torch.arange(batch_size, device=device)
+        boundaries[batch_idx, last_valid_idx] = 1.0
+
+        return boundaries, valid_mask
+
+    def _compute_learned_boundaries(self, hidden, lengths):
+        """Compute boundaries using learned MLP + RelaxedBernoulli sampling."""
         batch_size, seq_len, _ = hidden.shape
 
         hidden_dropped = self.dropout(hidden)
-
-        # Per-frame boundary logits
         logits = self.boundary_mlp(hidden_dropped).squeeze(-1)  # (B, L)
         probs = torch.sigmoid(logits)
 
         if self.training:
             bernoulli = torch.distributions.relaxed_bernoulli.RelaxedBernoulli(
-                temperature=self.temp,
-                probs=probs,
+                temperature=self.temp, probs=probs,
             )
             soft_boundaries = bernoulli.rsample()
         else:
             soft_boundaries = probs
+
         hard_samples = (soft_boundaries > 0.5).float()
 
-        # Mask boundaries based on lengths
-        boundary_seq_len = soft_boundaries.shape[1]
-        actual_lens = (lengths * boundary_seq_len).long()
-        pos_idx = torch.arange(boundary_seq_len, device=hidden.device).unsqueeze(0)
-        valid_mask = (pos_idx < actual_lens.unsqueeze(1)).float()
-
-        soft_boundaries = soft_boundaries * valid_mask
-        hard_samples = hard_samples * valid_mask
+        # Mask by lengths
+        soft_boundaries, valid_mask = self._apply_length_mask(
+            soft_boundaries, lengths, seq_len, batch_size)
+        hard_samples, _ = self._apply_length_mask(
+            hard_samples, lengths, seq_len, batch_size)
         masked_probs = probs * valid_mask
 
-        # Set boundary at last valid position to close the final segment
-        last_valid_idx = torch.clamp(actual_lens - 1, min=0, max=boundary_seq_len - 1)
-        batch_idx = torch.arange(batch_size, device=hidden.device)
-        soft_boundaries[batch_idx, last_valid_idx] = 1.0
-        hard_samples[batch_idx, last_valid_idx] = 1.0
-
+        # STE
         hard_boundaries = hard_samples - soft_boundaries.detach() + soft_boundaries
 
+        return hard_boundaries, hard_samples, masked_probs
+
+    def _compute_forced_boundaries(self, hidden, lengths, every_n=1):
+        """Compute deterministic boundaries (no learning).
+
+        every_n=1: boundary at every position (no compression)
+        every_n=2: boundary every other position (~2x compression)
+        """
+        batch_size, seq_len, _ = hidden.shape
+        device = hidden.device
+
+        if every_n == 1:
+            hard_boundaries = torch.ones(batch_size, seq_len, device=device)
+        else:
+            hard_boundaries = torch.zeros(batch_size, seq_len, device=device)
+            # [0, 1, 0, 1, ...] pattern — boundary at positions 1, 3, 5, ...
+            hard_boundaries[:, every_n - 1::every_n] = 1.0
+
+        hard_boundaries, _ = self._apply_length_mask(
+            hard_boundaries, lengths, seq_len, batch_size)
+
+        # No learned probs for forced modes
+        probs = hard_boundaries.clone()
+
+        return hard_boundaries, hard_boundaries, probs
+
+    # -------------------------------------------------------------------------
+    # Loss
+    # -------------------------------------------------------------------------
+
+    def _binomial_loss(self, hard_boundaries, lengths):
+        """Fixed-prior binomial loss."""
+        seq_len = hard_boundaries.shape[1]
+        actual_lens = (lengths * seq_len).long()
+        binomial = torch.distributions.binomial.Binomial(
+            total_count=actual_lens.float(),
+            probs=torch.tensor([self.prior], device=hard_boundaries.device),
+        )
+        num_boundaries = hard_boundaries.sum(dim=1)
+        return -binomial.log_prob(num_boundaries) / actual_lens.float().clamp(min=1)
+
+    # -------------------------------------------------------------------------
+    # Eval-only statistics
+    # -------------------------------------------------------------------------
+
+    def _compute_eval_stats(self, hard_samples, batch_size):
+        """Compute boundary spacing CV and adjacency % (eval only)."""
+        boundary_cv = None
+        boundary_adjacent_pct = None
+
+        with torch.no_grad():
+            all_spacings = []
+            adjacent_count = 0
+            total_boundary_pairs = 0
+            for b in range(batch_size):
+                bp = hard_samples[b].nonzero(as_tuple=True)[0]
+                if len(bp) > 1:
+                    spacings = bp[1:] - bp[:-1]
+                    all_spacings.extend(spacings.cpu().tolist())
+                    adjacent_count += (spacings == 1).sum().item()
+                    total_boundary_pairs += len(bp) - 1
+            if all_spacings:
+                st = torch.tensor(all_spacings, dtype=torch.float32)
+                m = st.mean()
+                boundary_cv = (st.std() / m).item() if m > 0 else 0.0
+            boundary_adjacent_pct = (
+                adjacent_count / total_boundary_pairs * 100.0
+            ) if total_boundary_pairs > 0 else 0.0
+
+        return boundary_cv, boundary_adjacent_pct
+
+    # -------------------------------------------------------------------------
+    # Forward
+    # -------------------------------------------------------------------------
+
+    def forward(
+        self,
+        hidden,
+        lengths,
+        target_boundary_counts=None,  # noqa: ARG002 - unused, kept for interface compat
+        return_unreduced_boundary_loss=False,
+    ):
+        batch_size, seq_len, _ = hidden.shape
+
+        # --- Compute boundaries based on mode ---
+        if self.boundary_mode == "all":
+            hard_boundaries, hard_samples, masked_probs = (
+                self._compute_forced_boundaries(hidden, lengths, every_n=1))
+        elif self.boundary_mode == "alternating":
+            hard_boundaries, hard_samples, masked_probs = (
+                self._compute_forced_boundaries(hidden, lengths, every_n=2))
+        else:  # "learned"
+            hard_boundaries, hard_samples, masked_probs = (
+                self._compute_learned_boundaries(hidden, lengths))
+
+        # --- Pooling ---
         pooled = self._mean_pooling(hard_boundaries, hidden)
 
-        # Compute shortened lengths
+        # --- Lengths ---
         max_segments = pooled.shape[1] if pooled.shape[1] > 0 else 1
         num_boundaries_per_sample = hard_boundaries.sum(dim=1)
         shortened_lengths = num_boundaries_per_sample / max_segments
 
-        # Loss
+        # --- Stats ---
         actual_lens = (lengths * seq_len).long()
         num_boundaries = hard_boundaries.sum().item()
         total_positions = actual_lens.sum().float().item()
         total_positions_per_sample = actual_lens.float()
 
-        if self.training:
+        # --- Loss (only for learned mode during training) ---
+        if self.training and self.boundary_mode == "learned":
             per_sample_loss = self._binomial_loss(hard_boundaries, lengths)
             loss = per_sample_loss if return_unreduced_boundary_loss else per_sample_loss.mean()
         else:
@@ -142,27 +254,12 @@ class BoundaryPredictor4(nn.Module):
             if return_unreduced_boundary_loss:
                 loss = loss.repeat(batch_size)
 
-        # --- Eval-only boundary statistics (CV, adjacency) ---
+        # --- Eval-only stats ---
         boundary_cv = None
         boundary_adjacent_pct = None
         if not self.training:
-            with torch.no_grad():
-                all_spacings = []
-                adjacent_count = 0
-                total_boundary_pairs = 0
-                for b in range(batch_size):
-                    bp = hard_samples[b].nonzero(as_tuple=True)[0]
-                    if len(bp) > 1:
-                        spacings = bp[1:] - bp[:-1]
-                        all_spacings.extend(spacings.cpu().tolist())
-                        adjacent_count += (spacings == 1).sum().item()
-                        total_boundary_pairs += len(bp) - 1
-                if all_spacings:
-                    st = torch.tensor(all_spacings, dtype=torch.float32)
-                    m = st.mean()
-                    boundary_cv = (st.std() / m).item() if m > 0 else 0.0
-                boundary_adjacent_pct = (adjacent_count / total_boundary_pairs * 100.0) if total_boundary_pairs > 0 else 0.0
-        # --- End eval-only statistics ---
+            boundary_cv, boundary_adjacent_pct = self._compute_eval_stats(
+                hard_samples, batch_size)
 
         return (
             pooled,
@@ -176,14 +273,3 @@ class BoundaryPredictor4(nn.Module):
             num_boundaries_per_sample,
             total_positions_per_sample,
         )
-
-    def _binomial_loss(self, hard_boundaries, lengths):
-        """Fixed-prior binomial loss (a la dynamic-pooling)."""
-        seq_len = hard_boundaries.shape[1]
-        actual_lens = (lengths * seq_len).long()
-        binomial = torch.distributions.binomial.Binomial(
-            total_count=actual_lens.float(),
-            probs=torch.tensor([self.prior], device=hard_boundaries.device),
-        )
-        num_boundaries = hard_boundaries.sum(dim=1)
-        return -binomial.log_prob(num_boundaries) / actual_lens.float().clamp(min=1)

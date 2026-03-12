@@ -285,18 +285,18 @@ class BoundaryPredictor2(nn.Module):
         k_input = hidden_dropped[:, 1:]   # (B, L-1, D)
 
         # Normalize once (instead of 4 times)
-        q_normed = F.normalize(q_input, dim=-1, eps=1e-8)
-        k_normed = F.normalize(k_input, dim=-1, eps=1e-8)
+        # q_normed = F.normalize(q_input, dim=-1, eps=1e-8)
+        # k_normed = F.normalize(k_input, dim=-1, eps=1e-8)
 
         # Apply MLP with residual and project (fused operations)
-        q_mlp_out = self.boundary_mlp(q_normed)
-        q_hidden = self.q_proj_layer(F.normalize(
-            q_mlp_out + q_normed, dim=-1, eps=1e-8))
+        # q_mlp_out = self.boundary_mlp(q_normed)
+        q_hidden = F.normalize(self.q_proj_layer(
+            q_input, dim=-1, eps=1e-8))
 
-        k_mlp_out = self.boundary_mlp(k_normed) # TODO: Ablate
-        k_hidden = self.k_proj_layer(F.normalize(
-            k_mlp_out + k_normed, dim=-1, eps=1e-8))
-
+        # k_mlp_out = self.boundary_mlp(k_normed) # TODO: Ablate
+        k_hidden = F.normalize(self.k_proj_layer(
+            k_input, dim=-1, eps=1e-8))
+    
         # Compute cosine similarity (already normalized, so this is just dot product)
         cos_sim = torch.einsum("bld,bld->bl", q_hidden, k_hidden)
 
@@ -309,8 +309,10 @@ class BoundaryPredictor2(nn.Module):
 
         # Optimized probability computation (fused operations, safe for gradients)
         probs = torch.clamp(
-            (1.0 - (cos_sim + self.similarity_bias)) * 0.5, min=0.0, max=1.0)
-        probs = F.pad(probs, (0, 1), value=0.0)
+            # (1.0 - (cos_sim + self.similarity_bias)) * 0.5, min=0.0, max=1.0)
+            (1.0 - cos_sim) * 0.5, min=0.0, max=1.0)
+        # probs = F.pad(probs, (0, 1), value=0.0)
+        probs = F.pad(probs, (1, 0), "constant", 1.0)
 
         # Debug: Check for NaN in probs (only when flag enabled to avoid GPU sync)
         if flags.PRINT_NAN_INF:
