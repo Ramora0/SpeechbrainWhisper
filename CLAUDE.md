@@ -110,7 +110,7 @@ From `hparams/bp_10x.yaml`:
 - `use_phoneme_boundary_targets: True` - Use phoneme counting instead of prior-based targets
 - `d_model: 144` - Transformer hidden dimension
 - `num_encoder_layers: 12` - Conformer encoder depth
-- `ctc_weight: 0` - Weight for CTC loss (0 = pure seq2seq, 1 = pure CTC)
+- `ctc_weight: 0.3` - Weight for CTC loss (0 = pure seq2seq, 1 = pure CTC). **CRITICAL: Always use `ctc_weight: 0.3` unless explicitly told otherwise.** CTC provides essential frame-level gradient signal to the encoder; without it the encoder struggles to converge. This has caused multiple failed experiments.
 
 ### Data Paths
 
