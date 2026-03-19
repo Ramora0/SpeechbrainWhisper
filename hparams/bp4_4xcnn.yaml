@@ -55,7 +55,7 @@ n_fft: 400
 n_mels: 80
 
 dynamic_batching: True
-max_batch_length_train: 2000
+max_batch_length_train: 1000
 max_batch_length_val: 150
 num_bucket: 200
 shuffle: True
