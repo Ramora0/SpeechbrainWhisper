@@ -232,7 +232,12 @@ class BoundaryPredictor4(nn.Module):
                 self._compute_learned_boundaries(hidden, lengths))
 
         # --- Pooling ---
-        pooled = self._mean_pooling(hard_boundaries, hidden)
+        if self.boundary_mode == "all":
+            # All boundaries = identity (each frame is its own segment).
+            # Skip _mean_pooling to avoid O(B*L*L) memory.
+            pooled = hidden
+        else:
+            pooled = self._mean_pooling(hard_boundaries, hidden)
 
         # --- Lengths ---
         max_segments = pooled.shape[1] if pooled.shape[1] > 0 else 1
