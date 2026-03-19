@@ -8,7 +8,7 @@
 # ############################################################################
 
 seed: 58008
-experiment_name: bp4_4xcnn
+experiment_name: bp4_4xcnn_forced_all
 use_bp: True
 __set_seed: !apply:speechbrain.utils.seed_everything [!ref <seed>]
 output_folder: !ref /fs/scratch/PAS2836/lees_stuff/librispeechbrain/results/<experiment_name>/<seed>
@@ -116,7 +116,7 @@ ctc_weight_decode: 0.40
 boundary_predictor_prior: 0.192
 boundary_predictor_temp: 1.0
 boundary_predictor_loss_weight: 1.0
-boundary_mode: learned  # "learned", "all", or "alternating"
+boundary_mode: all  # "learned", "all", or "alternating"
 
 ############################## Models ##########################################
 
