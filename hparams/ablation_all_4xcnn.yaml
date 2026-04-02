@@ -1,5 +1,5 @@
 # ############################################################################
-# BoundaryPredictorAblation -- forced all boundaries (boundary_mode=all)
+# BoundaryPredictorAll -- forced all boundaries (every position = boundary)
 # CNN: 4x time compression (2-block ConvolutionFrontEnd, strides 2+2)
 # BP: no compression (every frame is a boundary), mean pooling
 # Total compression: 4x (CNN only)
@@ -110,16 +110,10 @@ test_beam_size: 66
 lm_weight: 0.60
 ctc_weight_decode: 0.40
 
-# BoundaryPredictorAblation parameters
-boundary_predictor_prior: 0.192
+# BoundaryPredictorAll: every position is a boundary, no BP compression
+boundary_predictor_prior: 1.0
 boundary_predictor_temp: 1.0
 boundary_predictor_loss_weight: 0.0
-
-# Ablation: forced all boundaries, mean pooling
-boundary_mode: all
-pooling_mode: mean
-fixed_width: 5
-disable_temp_schedule: True
 
 ############################## Models ##########################################
 
@@ -149,14 +143,8 @@ Transformer:
   normalize_before: True
   causal: False
 
-BoundaryPredictor: !new:BoundaryPredictorAblation.BoundaryPredictorAblation
+BoundaryPredictor: !new:BoundaryPredictorAll.BoundaryPredictorAll
   input_dim: 640
-  prior: !ref <boundary_predictor_prior>
-  temp: !ref <boundary_predictor_temp>
-  boundary_mode: !ref <boundary_mode>
-  pooling_mode: !ref <pooling_mode>
-  fixed_width: !ref <fixed_width>
-  disable_temp_schedule: !ref <disable_temp_schedule>
 
 lm_model:
   !new:speechbrain.lobes.models.transformer.TransformerLM.TransformerLM # yamllint disable-line rule:line-length
